@@ -210,13 +210,7 @@
         }
 
         .file-input {
-            position: absolute;
-            opacity: 0;
-            width: 100%;
-            height: 100%;
-            cursor: pointer;
-            top: 0;
-            left: 0;
+            display: none;
         }
 
         .btn-group {
@@ -335,6 +329,14 @@
             height: 600px;
             border-radius: 8px;
             border: 1px solid #333;
+        }
+
+        #optimize-map {
+            width: 100%;
+            height: 600px;
+            border-radius: 8px;
+            border: 1px solid #333;
+            background: #1a1a1a;
         }
 
         /* Messages */
@@ -533,27 +535,27 @@
             </div>
             
             <div class="nav-menu">
-                <div class="nav-item" onclick="showSection('dashboard')">
+                <div class="nav-item" data-section="dashboard">
                     <i class="fas fa-th-large"></i>
                     Dashboard
                 </div>
-                <div class="nav-item" onclick="showSection('upload')">
+                <div class="nav-item" data-section="upload">
                     <i class="fas fa-upload"></i>
                     Upload Data
                 </div>
-                <div class="nav-item" onclick="showSection('visualize')">
+                <div class="nav-item" data-section="visualize">
                     <i class="fas fa-map-marked-alt"></i>
                     Visualize Points
                 </div>
-                <div class="nav-item" onclick="showSection('optimize')">
+                <div class="nav-item" data-section="optimize">
                     <i class="fas fa-route"></i>
                     Optimize Routes
                 </div>
-                <div class="nav-item" onclick="showSection('statistics')">
+                <div class="nav-item" data-section="statistics">
                     <i class="fas fa-chart-bar"></i>
                     Statistics
                 </div>
-                <div class="nav-item" onclick="showSection('settings')">
+                <div class="nav-item" data-section="settings">
                     <i class="fas fa-cog"></i>
                     Settings
                 </div>
@@ -618,8 +620,8 @@
                     </div>
                     
                     <div class="upload-section">
+                        <input type="file" id="csvFile" class="file-input" accept=".csv" style="display: none;" />
                         <div class="upload-area" id="fileUpload">
-                            <input type="file" id="csvFile" class="file-input" accept=".csv" />
                             <div class="upload-icon">
                                 <i class="fas fa-file-csv"></i>
                             </div>
@@ -752,23 +754,33 @@
         let dataLoaded = false;
 
         // Navigation
-        function showSection(sectionName) {
+        function showSection(sectionName, navItem) {
             // Hide all sections
             document.querySelectorAll('.section').forEach(section => {
                 section.style.display = 'none';
             });
-            
+
             // Remove active class from all nav items
             document.querySelectorAll('.nav-item').forEach(item => {
                 item.classList.remove('active');
             });
-            
+
             // Show selected section
             document.getElementById(sectionName + '-section').style.display = 'block';
-            
+
             // Add active class to clicked nav item
-            event.currentTarget.classList.add('active');
-            
+            if (navItem) {
+                navItem.classList.add('active');
+            } else {
+                // Fallback: add active to the nav-item matching the section
+                const navItems = document.querySelectorAll('.nav-item');
+                navItems.forEach(item => {
+                    if (item.getAttribute('data-section') === sectionName) {
+                        item.classList.add('active');
+                    }
+                });
+            }
+
             // Update page title
             const titles = {
                 'dashboard': 'Dashboard',
@@ -779,12 +791,44 @@
                 'settings': 'Settings'
             };
             document.querySelector('.page-title').textContent = titles[sectionName];
-            
-            // If switching to visualize section and data is loaded, display points
+
+            // Handle section-specific actions
             if (sectionName === 'visualize' && dataLoaded && boardingPoints.length > 0) {
                 displayPoints();
+            } else if (sectionName === 'optimize') {
+                // Always initialize optimize map when showing optimize section
+                console.log('Initializing optimize map...');
+                
+                // Add a longer delay to ensure the container is rendered and API is loaded
+                setTimeout(() => {
+                    initOptimizeMap();
+                    
+                    // Force map visibility after initialization
+                    setTimeout(() => {
+                        forceMapVisibility();
+                    }, 200);
+                    
+                    // If optimized routes exist, display them after map is ready
+                    if (optimizedRoutes.length > 0) {
+                        setTimeout(() => {
+                            console.log('Displaying optimized routes...');
+                            displayOptimizedRoutes();
+                            updateOptimizedLegend();
+                        }, 1000);
+                    } else {
+                        console.log('No optimized routes to display');
+                    }
+                }, 500);
             }
         }
+
+        // Attach click handler to nav-items to track last clicked (no inline onclick)
+        document.querySelectorAll('.nav-item').forEach(item => {
+            item.addEventListener('click', function(e) {
+                const sectionName = this.getAttribute('data-section');
+                showSection(sectionName, this);
+            });
+        });
 
         // Initialize Google Maps
         function initMap() {
@@ -886,8 +930,153 @@
             });
         }
 
-        // File input handling
-        document.getElementById('csvFile').addEventListener('change', function(e) {
+        // Initialize Optimize Map
+        function initOptimizeMap() {
+            console.log('initOptimizeMap called');
+            const mapContainer = document.getElementById('optimize-map');
+            console.log('Map container:', mapContainer);
+            
+            // Check if Google Maps API is loaded
+            if (typeof google === 'undefined' || typeof google.maps === 'undefined') {
+                console.log('Google Maps API not loaded yet, retrying in 500ms...');
+                setTimeout(initOptimizeMap, 500);
+                return;
+            }
+            
+            if (!window.optimizeMap && mapContainer) {
+                console.log('Creating optimize map...');
+                try {
+                    window.optimizeMap = new google.maps.Map(mapContainer, {
+                        center: { lat: 13.0827, lng: 80.2707 },
+                        zoom: 10,
+                        styles: [
+                            {
+                                featureType: 'all',
+                                elementType: 'geometry',
+                                stylers: [{ color: '#1a1a1a' }]
+                            },
+                            {
+                                featureType: 'all',
+                                elementType: 'labels.text.stroke',
+                                stylers: [{ color: '#1a1a1a' }]
+                            },
+                            {
+                                featureType: 'all',
+                                elementType: 'labels.text.fill',
+                                stylers: [{ color: '#7c3aed' }]
+                            },
+                            {
+                                featureType: 'administrative.locality',
+                                elementType: 'labels.text.fill',
+                                stylers: [{ color: '#d59563' }]
+                            },
+                            {
+                                featureType: 'poi',
+                                elementType: 'labels.text.fill',
+                                stylers: [{ color: '#d59563' }]
+                            },
+                            {
+                                featureType: 'poi.park',
+                                elementType: 'geometry',
+                                stylers: [{ color: '#263c3f' }]
+                            },
+                            {
+                                featureType: 'poi.park',
+                                elementType: 'labels.text.fill',
+                                stylers: [{ color: '#6b9a76' }]
+                            },
+                            {
+                                featureType: 'road',
+                                elementType: 'geometry',
+                                stylers: [{ color: '#2a2a2a' }]
+                            },
+                            {
+                                featureType: 'road',
+                                elementType: 'geometry.stroke',
+                                stylers: [{ color: '#333' }]
+                            },
+                            {
+                                featureType: 'road',
+                                elementType: 'labels.text.fill',
+                                stylers: [{ color: '#9ca5b3' }]
+                            },
+                            {
+                                featureType: 'road.highway',
+                                elementType: 'geometry',
+                                stylers: [{ color: '#374151' }]
+                            },
+                            {
+                                featureType: 'road.highway',
+                                elementType: 'geometry.stroke',
+                                stylers: [{ color: '#4b5563' }]
+                            },
+                            {
+                                featureType: 'road.highway',
+                                elementType: 'labels.text.fill',
+                                stylers: [{ color: '#f3d19c' }]
+                            },
+                            {
+                                featureType: 'transit',
+                                elementType: 'geometry',
+                                stylers: [{ color: '#1f2937' }]
+                            },
+                            {
+                                featureType: 'transit.station',
+                                elementType: 'labels.text.fill',
+                                stylers: [{ color: '#d59563' }]
+                            },
+                            {
+                                featureType: 'water',
+                                elementType: 'geometry',
+                                stylers: [{ color: '#17263c' }]
+                            },
+                            {
+                                featureType: 'water',
+                                elementType: 'labels.text.fill',
+                                stylers: [{ color: '#515c6d' }]
+                            },
+                            {
+                                featureType: 'water',
+                                elementType: 'labels.text.stroke',
+                                stylers: [{ color: '#17263c' }]
+                            }
+                        ]
+                    });
+                    console.log('Optimize map created successfully');
+                    
+                    // Force a resize event to ensure map displays properly
+                    setTimeout(() => {
+                        if (window.optimizeMap) {
+                            console.log('Triggering map resize...');
+                            google.maps.event.trigger(window.optimizeMap, 'resize');
+                            window.optimizeMap.setCenter({ lat: 13.0827, lng: 80.2707 });
+                            window.optimizeMap.setZoom(10);
+                        }
+                    }, 100);
+                    
+                } catch (error) {
+                    console.error('Error creating optimize map:', error);
+                }
+            } else if (window.optimizeMap) {
+                console.log('Optimize map already exists');
+                // Force a resize event even if map already exists
+                setTimeout(() => {
+                    console.log('Triggering existing map resize...');
+                    google.maps.event.trigger(window.optimizeMap, 'resize');
+                    window.optimizeMap.setCenter({ lat: 13.0827, lng: 80.2707 });
+                    window.optimizeMap.setZoom(10);
+                }, 100);
+            } else {
+                console.log('Map container not found, retrying in 500ms...');
+                setTimeout(initOptimizeMap, 500);
+            }
+        }
+
+        // Simple and direct file input control
+        const fileInput = document.getElementById('csvFile');
+        const uploadArea = document.getElementById('fileUpload');
+        
+        fileInput.addEventListener('change', function(e) {
             const file = e.target.files[0];
             const uploadBtn = document.getElementById('uploadBtn');
             const routeBtn = document.getElementById('routeBtn');
@@ -895,7 +1084,11 @@
             const message = document.getElementById('message');
 
             if (file) {
-                currentFile = file;
+                // Only set currentFile if it's a new file
+                if (!currentFile || currentFile.name !== file.name || currentFile.size !== file.size) {
+                    currentFile = file;
+                    dataLoaded = false; // Reset data loaded flag only for new file
+                }
                 uploadBtn.disabled = false;
                 routeBtn.disabled = false;
                 fileInfo.style.display = 'block';
@@ -906,7 +1099,6 @@
                     <p><strong>Type:</strong> ${file.type || 'text/csv'}</p>
                 `;
                 message.innerHTML = '';
-                dataLoaded = false; // Reset data loaded flag
             } else {
                 currentFile = null;
                 uploadBtn.disabled = true;
@@ -916,31 +1108,45 @@
             }
         });
 
+        // Only allow file input when clicking directly on upload area
+        uploadArea.addEventListener('click', function(e) {
+            // Only trigger if clicking on the upload area itself or its text elements
+            if (e.target === this || 
+                e.target.classList.contains('upload-icon') || 
+                e.target.classList.contains('upload-text') || 
+                e.target.classList.contains('upload-subtext')) {
+                fileInput.click();
+            }
+        });
+
         // Drag and drop functionality
-        const fileUpload = document.getElementById('fileUpload');
-        
-        fileUpload.addEventListener('dragover', function(e) {
+        uploadArea.addEventListener('dragover', function(e) {
             e.preventDefault();
-            fileUpload.classList.add('dragover');
+            uploadArea.classList.add('dragover');
         });
 
-        fileUpload.addEventListener('dragleave', function(e) {
+        uploadArea.addEventListener('dragleave', function(e) {
             e.preventDefault();
-            fileUpload.classList.remove('dragover');
+            uploadArea.classList.remove('dragover');
         });
 
-        fileUpload.addEventListener('drop', function(e) {
+        uploadArea.addEventListener('drop', function(e) {
             e.preventDefault();
-            fileUpload.classList.remove('dragover');
+            uploadArea.classList.remove('dragover');
             const files = e.dataTransfer.files;
             if (files.length > 0) {
-                document.getElementById('csvFile').files = files;
-                document.getElementById('csvFile').dispatchEvent(new Event('change'));
+                // Assign files and trigger change event only if not already the same file
+                if (!fileInput.files.length || fileInput.files[0].name !== files[0].name || fileInput.files[0].size !== files[0].size) {
+                    fileInput.files = files;
+                    // Only trigger change event if file is different
+                    fileInput.dispatchEvent(new Event('change'));
+                }
             }
         });
 
         // Upload button handling
-        document.getElementById('uploadBtn').addEventListener('click', function() {
+        document.getElementById('uploadBtn').addEventListener('click', function(e) {
+            // Prevent re-triggering file input or reloading file if already loaded
             if (!currentFile) return;
 
             const loading = document.getElementById('loading');
@@ -1021,7 +1227,7 @@
         });
 
         // Route optimization button handling
-        document.getElementById('routeBtn').addEventListener('click', function() {
+        document.getElementById('routeBtn').addEventListener('click', function(e) {
             if (!currentFile) return;
 
             const loading = document.getElementById('loading');
@@ -1029,11 +1235,13 @@
             const routeInfo = document.getElementById('routeInfo');
 
             loading.style.display = 'block';
-            document.getElementById('loadingText').textContent = 'Optimizing routes... This may take a few minutes.';
+            document.getElementById('loadingText').textContent = 'Optimizing routes with enhanced algorithm... This should be much faster now!';
             message.innerHTML = '';
 
             const formData = new FormData();
             formData.append('file', currentFile);
+
+            const startTime = Date.now();
 
             fetch('http://localhost:5000/api/route', {
                 method: 'POST',
@@ -1041,13 +1249,38 @@
             })
             .then(response => response.json())
             .then(data => {
+                const endTime = Date.now();
+                const clientTime = (endTime - startTime) / 1000;
+                
                 if (data.success) {
                     optimizedRoutes = data.routes;
-                    displayOptimizedRoutes();
-                    updateRouteSummary(data.summary);
-                    updateDashboard();
-                    message.innerHTML = `<div class="success"><i class="fas fa-check-circle"></i> Route optimization completed! Generated ${data.summary.total_routes} routes.</div>`;
-                    routeInfo.style.display = 'block';
+                    
+                    // Initialize optimize map if not already done
+                    if (!window.optimizeMap) {
+                        console.log('Initializing optimize map from route optimization...');
+                        initOptimizeMap();
+                    }
+                    
+                    // Add a delay to ensure map is ready
+                    setTimeout(() => {
+                        displayOptimizedRoutes();
+                        updateRouteSummary(data.summary);
+                        updateDashboard();
+                        updateOptimizedLegend(); // Update legend for optimized routes
+                        
+                        const serverTime = data.summary.processing_time_seconds || 0;
+                        message.innerHTML = `
+                            <div class="success">
+                                <i class="fas fa-check-circle"></i> 
+                                Route optimization completed! Generated ${data.summary.total_routes} routes.
+                                <br><small>Server processing time: ${serverTime.toFixed(2)}s | Total time: ${clientTime.toFixed(2)}s</small>
+                            </div>
+                        `;
+                        routeInfo.style.display = 'block';
+                        
+                        // Switch to optimize section to show the routes
+                        showSection('optimize');
+                    }, 1000);
                 } else {
                     message.innerHTML = `<div class="error"><i class="fas fa-exclamation-triangle"></i> Error: ${data.error}</div>`;
                 }
@@ -1122,10 +1355,60 @@
             }
         }
 
+        // Force map to be visible
+        function forceMapVisibility() {
+            if (window.optimizeMap) {
+                console.log('Forcing map visibility...');
+                const mapContainer = document.getElementById('optimize-map');
+                if (mapContainer) {
+                    // Ensure container is visible
+                    mapContainer.style.display = 'block';
+                    mapContainer.style.visibility = 'visible';
+                    mapContainer.style.opacity = '1';
+                    mapContainer.style.height = '600px';
+                    mapContainer.style.width = '100%';
+                    
+                    // Force map resize
+                    google.maps.event.trigger(window.optimizeMap, 'resize');
+                    window.optimizeMap.setCenter({ lat: 13.0827, lng: 80.2707 });
+                    window.optimizeMap.setZoom(10);
+                    
+                    console.log('Map container styles:', {
+                        display: mapContainer.style.display,
+                        visibility: mapContainer.style.visibility,
+                        opacity: mapContainer.style.opacity,
+                        height: mapContainer.style.height,
+                        width: mapContainer.style.width
+                    });
+                }
+            }
+        }
+
+        // Check if optimize map is ready
+        function isOptimizeMapReady() {
+            return window.optimizeMap && typeof window.optimizeMap !== 'undefined';
+        }
+
         // Display optimized routes
         function displayOptimizedRoutes() {
+            // Check if map is ready
+            if (!isOptimizeMapReady()) {
+                console.log('Optimize map not ready, retrying in 500ms...');
+                setTimeout(displayOptimizedRoutes, 500);
+                return;
+            }
+            
+            console.log('Displaying optimized routes on map...');
+            
+            // Clear existing markers and routes
             markers.forEach(marker => marker.setMap(null));
             markers = [];
+            
+            // Clear existing polylines
+            if (window.routePolylines) {
+                window.routePolylines.forEach(polyline => polyline.setMap(null));
+            }
+            window.routePolylines = [];
 
             if (optimizedRoutes.length === 0) return;
 
@@ -1136,7 +1419,13 @@
                 const routeColor = getClusterColor(routeIndex);
                 routeColors[route.bus_id] = routeColor;
 
+                // Create route path
+                const routePath = [];
+                
                 route.stops.forEach((stop, stopIndex) => {
+                    const position = { lat: stop.lat, lng: stop.lon };
+                    routePath.push(position);
+                    
                     let icon;
                     if (stop.type === 'college') {
                         icon = {
@@ -1155,10 +1444,16 @@
                     }
 
                     const marker = new google.maps.Marker({
-                        position: { lat: stop.lat, lng: stop.lon },
-                        map: map,
+                        position: position,
+                        map: window.optimizeMap, // Use optimizeMap
                         title: `Bus ${route.bus_id}: ${stop.name}`,
-                        icon: icon
+                        icon: icon,
+                        label: {
+                            text: stop.type === 'college' ? 'C' : stop.students.toString(),
+                            color: 'white',
+                            fontSize: '12px',
+                            fontWeight: 'bold'
+                        }
                     });
 
                     const infoWindow = new google.maps.InfoWindow({
@@ -1179,15 +1474,37 @@
                     });
 
                     marker.addListener('click', () => {
-                        infoWindow.open(map, marker);
+                        infoWindow.open(window.optimizeMap, marker); // Use optimizeMap
                     });
 
                     markers.push(marker);
-                    bounds.extend(marker.getPosition());
+                    bounds.extend(position);
                 });
+
+                // Create route polyline
+                const polyline = new google.maps.Polyline({
+                    path: routePath,
+                    geodesic: true,
+                    strokeColor: routeColor,
+                    strokeOpacity: 0.8,
+                    strokeWeight: 4,
+                    map: window.optimizeMap // Use optimizeMap
+                });
+
+                window.routePolylines.push(polyline);
             });
 
-            map.fitBounds(bounds);
+            // Fit map to show all routes
+            if (bounds.isEmpty()) {
+                window.optimizeMap.setCenter({ lat: 13.0827, lng: 80.2707 }); // Use optimizeMap
+                window.optimizeMap.setZoom(10); // Use optimizeMap
+            } else {
+                window.optimizeMap.fitBounds(bounds); // Use optimizeMap
+                // Add some padding to the bounds
+                const listener = google.maps.event.addListenerOnce(window.optimizeMap, 'bounds_changed', function() {
+                    window.optimizeMap.setZoom(Math.min(window.optimizeMap.getZoom(), 12)); // Use optimizeMap
+                });
+            }
         }
 
         // Create bus icon SVG
@@ -1240,42 +1557,6 @@
             document.getElementById('totalClusters').textContent = totalClusters;
         }
 
-        // Update dashboard
-        function updateDashboard() {
-            const totalPoints = boardingPoints.length;
-            const totalStudents = boardingPoints.reduce((sum, point) => sum + point.student_count, 0);
-            const totalRoutes = optimizedRoutes.length;
-            const totalDistance = optimizedRoutes.reduce((sum, route) => sum + route.total_distance_km, 0);
-
-            document.getElementById('dashboardPoints').textContent = totalPoints;
-            document.getElementById('dashboardStudents').textContent = totalStudents;
-            document.getElementById('dashboardRoutes').textContent = totalRoutes;
-            document.getElementById('dashboardDistance').textContent = totalDistance.toFixed(1);
-        }
-
-        // Update route summary
-        function updateRouteSummary(summary) {
-            const routeSummary = document.getElementById('routeSummary');
-            routeSummary.innerHTML = `
-                <div class="route-stat">
-                    <div class="route-stat-number">${summary.total_routes}</div>
-                    <div class="route-stat-label">Total Routes</div>
-                </div>
-                <div class="route-stat">
-                    <div class="route-stat-number">${summary.total_students}</div>
-                    <div class="route-stat-label">Students Served</div>
-                </div>
-                <div class="route-stat">
-                    <div class="route-stat-number">${summary.total_distance.toFixed(1)}</div>
-                    <div class="route-stat-label">Total Distance (km)</div>
-                </div>
-                <div class="route-stat">
-                    <div class="route-stat-number">${summary.total_time.toFixed(0)}</div>
-                    <div class="route-stat-label">Total Time (min)</div>
-                </div>
-            `;
-        }
-
         // Update legend
         function updateLegend() {
             const legendItems = document.getElementById('legendItems');
@@ -1290,6 +1571,62 @@
                 `;
                 legendItems.appendChild(item);
             });
+        }
+
+        // Update legend for optimized routes
+        function updateOptimizedLegend() {
+            const legendItems = document.getElementById('legendItems');
+            legendItems.innerHTML = '';
+
+            optimizedRoutes.forEach((route, index) => {
+                const routeColor = getClusterColor(index);
+                const item = document.createElement('div');
+                item.className = 'legend-item';
+                item.innerHTML = `
+                    <div class="legend-color" style="background-color: ${routeColor}"></div>
+                    <span><i class="fas fa-bus"></i> Bus ${route.bus_id} (${route.total_students} students)</span>
+                `;
+                legendItems.appendChild(item);
+            });
+
+            // Show legend
+            document.getElementById('legend').style.display = 'block';
+        }
+
+        // Update dashboard
+        function updateDashboard() {
+            const totalPoints = boardingPoints.length;
+            const totalStudents = boardingPoints.reduce((sum, point) => sum + point.student_count, 0);
+            const totalClusters = new Set(boardingPoints.map(point => point.cluster)).size;
+            const totalDistance = optimizedRoutes.reduce((sum, route) => sum + route.total_distance_km, 0);
+
+            document.getElementById('dashboardPoints').textContent = totalPoints;
+            document.getElementById('dashboardStudents').textContent = totalStudents;
+            document.getElementById('dashboardRoutes').textContent = totalClusters;
+            document.getElementById('dashboardDistance').textContent = totalDistance.toFixed(1);
+        }
+
+        // Update route summary
+        function updateRouteSummary(summary) {
+            const routeSummary = document.getElementById('routeSummary');
+            routeSummary.innerHTML = `
+                <div class="route-stat">
+                    <div class="route-stat-number">${summary.total_routes}</div>
+                    <div class="route-stat-label">Total Routes</div>
+                </div>
+                <div class="route-stat">
+                    <div class="route-stat-number">${summary.total_students}</div>
+                    <div class="route-stat-label">Total Students</div>
+                </div>
+                <div class="route-stat">
+                    <div class="route-stat-number">${summary.total_distance_km.toFixed(1)}</div>
+                    <div class="route-stat-label">Total Distance (km)</div>
+                </div>
+                <div class="route-stat">
+                    <div class="route-stat-number">${summary.total_time_min.toFixed(0)}</div>
+                    <div class="route-stat-label">Total Time (min)</div>
+                </div>
+            `;
         }
 
         // Initialize dashboard
