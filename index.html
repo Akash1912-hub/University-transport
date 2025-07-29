@@ -895,6 +895,9 @@
             const message = document.getElementById('message');
 
             if (file) {
+                // Only reset data if it's a different file
+                const isNewFile = !currentFile || currentFile.name !== file.name || currentFile.size !== file.size;
+                
                 currentFile = file;
                 uploadBtn.disabled = false;
                 routeBtn.disabled = false;
@@ -906,13 +909,19 @@
                     <p><strong>Type:</strong> ${file.type || 'text/csv'}</p>
                 `;
                 message.innerHTML = '';
-                dataLoaded = false; // Reset data loaded flag
+                
+                // Only reset dataLoaded if it's actually a new file
+                if (isNewFile) {
+                    dataLoaded = false;
+                    boardingPoints = [];
+                }
             } else {
                 currentFile = null;
                 uploadBtn.disabled = true;
                 routeBtn.disabled = true;
                 fileInfo.style.display = 'none';
                 dataLoaded = false;
+                boardingPoints = [];
             }
         });
 
@@ -941,7 +950,10 @@
 
         // Upload button handling
         document.getElementById('uploadBtn').addEventListener('click', function() {
-            if (!currentFile) return;
+            if (!currentFile) {
+                message.innerHTML = `<div class="error"><i class="fas fa-exclamation-triangle"></i> Please select a CSV file first.</div>`;
+                return;
+            }
 
             const loading = document.getElementById('loading');
             const message = document.getElementById('message');
@@ -1020,6 +1032,21 @@
             reader.readAsText(currentFile);
         });
 
+        // Test backend connection
+        window.testBackend = function() {
+            console.log('🧪 Testing backend connection...');
+            fetch('http://localhost:5000/api/health')
+                .then(response => response.json())
+                .then(data => {
+                    console.log('✅ Backend health check:', data);
+                    alert('Backend is working! Status: ' + data.status);
+                })
+                .catch(error => {
+                    console.error('❌ Backend test failed:', error);
+                    alert('Backend test failed: ' + error.message);
+                });
+        };
+
         // Route optimization button handling
         document.getElementById('routeBtn').addEventListener('click', function() {
             if (!currentFile) return;
@@ -1035,36 +1062,86 @@
             const formData = new FormData();
             formData.append('file', currentFile);
 
+            console.log('🚀 Starting route optimization...');
+            console.log('📁 File being uploaded:', currentFile.name);
+            
+            // Add timeout to prevent hanging requests
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 300000); // 5 minutes timeout
+            
             fetch('http://localhost:5000/api/route', {
                 method: 'POST',
-                body: formData
+                body: formData,
+                signal: controller.signal
             })
-            .then(response => response.json())
+            .then(response => {
+                console.log('📡 Response status:', response.status);
+                console.log('📡 Response headers:', response.headers);
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                
+                return response.json();
+            })
             .then(data => {
-                if (data.success) {
+                console.log('📊 Received data:', data);
+                
+                if (data.success && data.routes && data.routes.length > 0) {
                     optimizedRoutes = data.routes;
-                    displayOptimizedRoutes();
+                    console.log('✅ Routes received:', optimizedRoutes.length);
+                    
+                    // Ensure map is initialized
+                    if (!map) {
+                        console.log('🗺️ Initializing map...');
+                        initMap();
+                        setTimeout(() => {
+                            displayOptimizedRoutes();
+                        }, 1000);
+                    } else {
+                        displayOptimizedRoutes();
+                    }
+                    
                     updateRouteSummary(data.summary);
                     updateDashboard();
                     message.innerHTML = `<div class="success"><i class="fas fa-check-circle"></i> Route optimization completed! Generated ${data.summary.total_routes} routes.</div>`;
                     routeInfo.style.display = 'block';
-                } else {
+                    
+                    // Switch to visualize section to show the results
+                    setTimeout(() => {
+                        showSection('visualize');
+                    }, 500);
+                    
+                } else if (data.error) {
+                    console.error('❌ Algorithm error:', data.error);
                     message.innerHTML = `<div class="error"><i class="fas fa-exclamation-triangle"></i> Error: ${data.error}</div>`;
+                } else {
+                    console.error('❌ Invalid response format:', data);
+                    message.innerHTML = `<div class="error"><i class="fas fa-exclamation-triangle"></i> Error: Invalid response from server</div>`;
                 }
             })
             .catch(error => {
+                console.error('❌ Network error:', error);
                 message.innerHTML = `<div class="error"><i class="fas fa-exclamation-triangle"></i> Error: ${error.message}</div>`;
             })
             .finally(() => {
+                clearTimeout(timeoutId);
                 loading.style.display = 'none';
             });
         });
 
         // Display points on map
         function displayPoints() {
-            // Clear existing markers
+            // Clear existing markers and polylines
             markers.forEach(marker => marker.setMap(null));
             markers = [];
+            
+            // Clear existing polylines
+            if (window.routePolylines) {
+                window.routePolylines.forEach(polyline => polyline.setMap(null));
+            }
+            window.routePolylines = [];
+            
             clusterColors = {};
 
             if (boardingPoints.length === 0) return;
@@ -1124,19 +1201,41 @@
 
         // Display optimized routes
         function displayOptimizedRoutes() {
+            console.log('🗺️ Displaying optimized routes...');
+            console.log('📊 Optimized routes:', optimizedRoutes);
+            
+            // Clear existing markers and polylines
             markers.forEach(marker => marker.setMap(null));
             markers = [];
+            
+            // Clear existing polylines
+            if (window.routePolylines) {
+                window.routePolylines.forEach(polyline => polyline.setMap(null));
+            }
+            window.routePolylines = [];
 
-            if (optimizedRoutes.length === 0) return;
+            if (!optimizedRoutes || optimizedRoutes.length === 0) {
+                console.log('❌ No optimized routes to display');
+                return;
+            }
 
+            console.log(`✅ Displaying ${optimizedRoutes.length} routes`);
             const bounds = new google.maps.LatLngBounds();
             const routeColors = {};
 
             optimizedRoutes.forEach((route, routeIndex) => {
+                console.log(`🚌 Processing route ${route.bus_id}:`, route);
                 const routeColor = getClusterColor(routeIndex);
                 routeColors[route.bus_id] = routeColor;
 
+                if (!route.stops || route.stops.length === 0) {
+                    console.log(`⚠️ Route ${route.bus_id} has no stops`);
+                    return;
+                }
+
                 route.stops.forEach((stop, stopIndex) => {
+                    console.log(`📍 Adding stop ${stopIndex}:`, stop);
+                    
                     let icon;
                     if (stop.type === 'college') {
                         icon = {
@@ -1185,9 +1284,76 @@
                     markers.push(marker);
                     bounds.extend(marker.getPosition());
                 });
+                
+                // Create polyline for this route
+                if (route.stops.length > 1) {
+                    const path = route.stops.map(stop => ({
+                        lat: stop.lat,
+                        lng: stop.lon
+                    }));
+                    
+                    const polyline = new google.maps.Polyline({
+                        path: path,
+                        geodesic: true,
+                        strokeColor: routeColor,
+                        strokeOpacity: 0.8,
+                        strokeWeight: 4,
+                        map: map,
+                        clickable: true,
+                        title: `Bus Route ${route.bus_id}`
+                    });
+                    
+                    // Add click listener to polyline
+                    polyline.addListener('click', () => {
+                        const infoWindow = new google.maps.InfoWindow({
+                            content: `
+                                <div style="padding: 15px; min-width: 250px; font-family: 'Inter', sans-serif; color: #1a1a1a;">
+                                    <h3 style="margin: 0 0 15px 0; color: #1a1a1a; font-size: 1.2rem;">
+                                        <i class="fas fa-route" style="color: ${routeColor}"></i> Bus Route ${route.bus_id}
+                                    </h3>
+                                    <div style="background: #f8f9fa; padding: 15px; border-radius: 8px; margin-bottom: 10px;">
+                                        <p style="margin: 8px 0; color: #495057;"><strong>Total Students:</strong> ${route.total_students}</p>
+                                        <p style="margin: 8px 0; color: #495057;"><strong>Route Distance:</strong> ${route.total_distance_km.toFixed(2)} km</p>
+                                        <p style="margin: 8px 0; color: #495057;"><strong>Route Time:</strong> ${route.total_time_min.toFixed(0)} min</p>
+                                        <p style="margin: 8px 0; color: #495057;"><strong>Stops:</strong> ${route.stops.length}</p>
+                                    </div>
+                                </div>
+                            `
+                        });
+                        infoWindow.setPosition(path[Math.floor(path.length / 2)]);
+                        infoWindow.open(map);
+                    });
+                    
+                    // Add arrowheads to show direction
+                    const arrow = new google.maps.Marker({
+                        position: path[Math.floor(path.length / 2)],
+                        map: map,
+                        icon: {
+                            path: google.maps.SymbolPath.FORWARD_CLOSED_ARROW,
+                            scale: 3,
+                            strokeColor: routeColor,
+                            fillColor: routeColor
+                        },
+                        title: `Route ${route.bus_id} direction`
+                    });
+                    
+                    window.routePolylines.push(polyline);
+                    window.routePolylines.push(arrow);
+                    
+                    console.log(`🛣️ Created polyline for route ${route.bus_id} with ${path.length} points`);
+                }
             });
 
+            console.log(`✅ Added ${markers.length} markers and ${window.routePolylines.length} polylines to map`);
             map.fitBounds(bounds);
+            
+            // Update route summary with polyline info
+            updateRouteSummary({
+                total_routes: optimizedRoutes.length,
+                total_students: optimizedRoutes.reduce((sum, route) => sum + route.total_students, 0),
+                total_distance: optimizedRoutes.reduce((sum, route) => sum + route.total_distance_km, 0),
+                total_time: optimizedRoutes.reduce((sum, route) => sum + route.total_time_min, 0)
+            });
         }
 
         // Create bus icon SVG
@@ -1258,11 +1424,11 @@
             const routeSummary = document.getElementById('routeSummary');
             routeSummary.innerHTML = `
                 <div class="route-stat">
-                    <div class="route-stat-number">${summary.total_routes}</div>
-                    <div class="route-stat-label">Total Routes</div>
+                    <div class="route-stat-number">${summary.buses_required || summary.total_routes}</div>
+                    <div class="route-stat-label">Buses Required</div>
                 </div>
                 <div class="route-stat">
-                    <div class="route-stat-number">${summary.total_students}</div>
+                    <div class="route-stat-number">${summary.students_served || summary.total_students}</div>
                     <div class="route-stat-label">Students Served</div>
                 </div>
                 <div class="route-stat">
@@ -1302,6 +1468,14 @@
                     initMap();
                 }
             }, 1000);
+            
+            // Add debug function to check file persistence
+            window.checkFilePersistence = function() {
+                console.log('📁 Current file:', currentFile ? currentFile.name : 'None');
+                console.log('📊 Data loaded:', dataLoaded);
+                console.log('📍 Boarding points:', boardingPoints.length);
+                console.log('🚌 Optimized routes:', optimizedRoutes.length);
+            };
         });
     </script>
     
