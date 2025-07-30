@@ -803,11 +803,6 @@
                 setTimeout(() => {
                     initOptimizeMap();
                     
-                    // Force map visibility after initialization
-                    setTimeout(() => {
-                        forceMapVisibility();
-                    }, 200);
-                    
                     // If optimized routes exist, display them after map is ready
                     if (optimizedRoutes.length > 0) {
                         setTimeout(() => {
@@ -1351,35 +1346,6 @@
                 map.fitBounds(bounds);
                 if (markers.length === 1) {
                     map.setZoom(15);
-                }
-            }
-        }
-
-        // Force map to be visible
-        function forceMapVisibility() {
-            if (window.optimizeMap) {
-                console.log('Forcing map visibility...');
-                const mapContainer = document.getElementById('optimize-map');
-                if (mapContainer) {
-                    // Ensure container is visible
-                    mapContainer.style.display = 'block';
-                    mapContainer.style.visibility = 'visible';
-                    mapContainer.style.opacity = '1';
-                    mapContainer.style.height = '600px';
-                    mapContainer.style.width = '100%';
-                    
-                    // Force map resize
-                    google.maps.event.trigger(window.optimizeMap, 'resize');
-                    window.optimizeMap.setCenter({ lat: 13.0827, lng: 80.2707 });
-                    window.optimizeMap.setZoom(10);
-                    
-                    console.log('Map container styles:', {
-                        display: mapContainer.style.display,
-                        visibility: mapContainer.style.visibility,
-                        opacity: mapContainer.style.opacity,
-                        height: mapContainer.style.height,
-                        width: mapContainer.style.width
-                    });
                 }
             }
         }

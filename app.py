@@ -1,16 +1,17 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import pandas as pd
-import requests
 import numpy as np
+import osmnx as ox
+import networkx as nx
 from sklearn.cluster import KMeans
-from ortools.constraint_solver import routing_enums_pb2, pywrapcp
-import json
+from ortools.constraint_solver import pywrapcp, routing_enums_pb2
+import openrouteservice
+import polyline
 import tempfile
 import os
-import math
-from functools import lru_cache
 import time
+import math
 
 app = Flask(__name__)
 CORS(app)
@@ -21,231 +22,318 @@ COLLEGE_LON = 80.2707
 MAX_BUS_CAPACITY = 55
 MAX_DISTANCE_KM = 40
 MAX_DURATION_MIN = 120
-OSRM_URL = "http://router.project-osrm.org/route/v1/driving/"
+# You'll need to add your OpenRouteService API key here
+ORS_API_KEY = 'eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6IjQ4MjA0YTNjOTE5MTRjMTE5M2QzZjg1YzM1YWQxYjQwIiwiaCI6Im11cm11cjY0In0='  # Replace with actual key
 
-# Cache for distance calculations
-distance_cache = {}
+def load_boarding_points(df):
+    """Load and prepare boarding points data"""
+    # Check if required columns exist
+    required_columns = ['bus_stop_lat', 'bus_stop_lon', 'student_count']
+    missing_columns = [col for col in required_columns if col not in df.columns]
+    
+    if missing_columns:
+        raise ValueError(f"Missing required columns: {missing_columns}")
+    
+    # Remove rows with missing values
+    df = df.dropna(subset=['bus_stop_lat', 'bus_stop_lon', 'student_count'])
+    
+    # Check if we have any data left
+    if len(df) == 0:
+        raise ValueError("No valid data points found after removing missing values")
+    
+    # Rename columns to match expected format
+    df = df.rename(columns={
+        'bus_stop_lat': 'latitude',
+        'bus_stop_lon': 'longitude', 
+        'student_count': 'no_of_students'
+    })
+    
+    # Ensure numeric types
+    df['latitude'] = pd.to_numeric(df['latitude'], errors='coerce')
+    df['longitude'] = pd.to_numeric(df['longitude'], errors='coerce')
+    df['no_of_students'] = pd.to_numeric(df['no_of_students'], errors='coerce')
+    
+    # Remove rows with invalid coordinates or student counts
+    df = df.dropna(subset=['latitude', 'longitude', 'no_of_students'])
+    
+    # Check if we have any data left
+    if len(df) == 0:
+        raise ValueError("No valid data points found after data validation")
+    
+    print(f"Loaded {len(df)} valid boarding points")
+    return df
 
-def calculate_optimal_buses(total_students):
-    return max(1, min(20, (total_students + MAX_BUS_CAPACITY - 1) // MAX_BUS_CAPACITY))
-
-def haversine_distance(lat1, lon1, lat2, lon2):
-    """Calculate straight-line distance between two points"""
-    R = 6371  # Earth's radius in kilometers
-    
-    lat1, lon1, lat2, lon2 = map(math.radians, [lat1, lon1, lat2, lon2])
-    dlat = lat2 - lat1
-    dlon = lon2 - lon1
-    
-    a = math.sin(dlat/2)**2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon/2)**2
-    c = 2 * math.asin(math.sqrt(a))
-    return R * c
-
-def batch_distance_matrix(coords, batch_size=10):
-    """Get distance matrix using batch API calls for efficiency"""
-    n = len(coords)
-    matrix = [[0] * n for _ in range(n)]
-    
-    print(f"Computing distance matrix for {n} points using batch processing...")
-    
-    # Use straight-line distance for small datasets (faster)
-    if n <= 20:
-        print("Using straight-line distance calculation for small dataset")
-        for i in range(n):
-            for j in range(n):
-                if i != j:
-                    matrix[i][j] = haversine_distance(
-                        coords[i][0], coords[i][1], 
-                        coords[j][0], coords[j][1]
-                    )
-        return matrix
-    
-    # For larger datasets, use batch API calls
-    for i in range(0, n, batch_size):
-        end_i = min(i + batch_size, n)
-        print(f"Processing batch {i//batch_size + 1}/{(n + batch_size - 1)//batch_size}")
+def check_accessibility(df):
+    """Road accessibility check using OSMNX"""
+    try:
+        # Create graph around the mean location
+        center_lat, center_lon = df['latitude'].mean(), df['longitude'].mean()
         
-        for j in range(0, n, batch_size):
-            end_j = min(j + batch_size, n)
-            
-            # Build batch URL
-            waypoints = []
-            for ii in range(i, end_i):
-                for jj in range(j, end_j):
-                    if ii != jj:
-                        waypoints.append(f"{coords[ii][1]},{coords[ii][0]};{coords[jj][1]},{coords[jj][0]}")
-            
-            if waypoints:
-                try:
-                    # Make batch request
-                    batch_url = f"{OSRM_URL}{';'.join(waypoints)}?overview=false"
-                    response = requests.get(batch_url, timeout=15)
+        # Check if coordinates are valid
+        if pd.isna(center_lat) or pd.isna(center_lon):
+            print("Invalid coordinates detected, skipping accessibility check")
+            return df
+        
+        G = ox.graph_from_point((center_lat, center_lon), dist=10000, network_type='drive')
+        
+        accessible = []
+        for _, row in df.iterrows():
+            try:
+                # Check if coordinates are valid
+                if pd.isna(row['latitude']) or pd.isna(row['longitude']):
+                    accessible.append(False)
+                    continue
                     
-                    if response.status_code == 200:
-                        routes = response.json().get('routes', [])
-                        route_idx = 0
-                        
-                        for ii in range(i, end_i):
-                            for jj in range(j, end_j):
-                                if ii != jj and route_idx < len(routes):
-                                    matrix[ii][jj] = routes[route_idx]['distance'] / 1000
-                                    route_idx += 1
-                                elif ii != jj:
-                                    # Fallback to straight-line distance
-                                    matrix[ii][jj] = haversine_distance(
-                                        coords[ii][0], coords[ii][1], 
-                                        coords[jj][0], coords[jj][1]
-                                    )
-                    else:
-                        # Fallback to straight-line distance for this batch
-                        for ii in range(i, end_i):
-                            for jj in range(j, end_j):
-                                if ii != jj:
-                                    matrix[ii][jj] = haversine_distance(
-                                        coords[ii][0], coords[ii][1], 
-                                        coords[jj][0], coords[jj][1]
-                                    )
-                except:
-                    # Fallback to straight-line distance for this batch
-                    for ii in range(i, end_i):
-                        for jj in range(j, end_j):
-                            if ii != jj:
-                                matrix[ii][jj] = haversine_distance(
-                                    coords[ii][0], coords[ii][1], 
-                                    coords[jj][0], coords[jj][1]
-                                )
-    
-    return matrix
+                ox.get_nearest_node(G, (row['latitude'], row['longitude']))
+                accessible.append(True)
+            except Exception as e:
+                print(f"Point accessibility check failed: {e}")
+                accessible.append(False)
+        
+        df['accessible'] = accessible
+        accessible_df = df[df['accessible'] == True]
+        
+        if len(accessible_df) == 0:
+            print("No accessible points found, returning all points")
+            return df
+        
+        return accessible_df
+    except Exception as e:
+        print(f"Accessibility check failed: {e}")
+        # Return all points if accessibility check fails
+        return df
 
-def fast_tsp_solve(coords, distance_matrix):
-    """Fast TSP solver using nearest neighbor heuristic"""
-    n = len(coords)
-    if n <= 2:
-        return list(range(n))
+def cluster_points(df, college_coord, max_students=55):
+    """Capacity-Constrained Clustering"""
+    # Check if DataFrame is empty
+    if len(df) == 0:
+        print("Warning: No data points available for clustering")
+        return df
     
-    # Use nearest neighbor heuristic for speed
-    unvisited = set(range(1, n))  # Start from index 0
-    route = [0]
-    current = 0
+    # Ensure we have at least one cluster
+    num_clusters = max(1, len(df) // max(1, (max_students // df['no_of_students'].max())))
     
-    while unvisited:
-        # Find nearest unvisited neighbor
-        nearest = min(unvisited, key=lambda x: distance_matrix[current][x])
-        route.append(nearest)
-        unvisited.remove(nearest)
-        current = nearest
+    # If only one point, create a single cluster
+    if len(df) == 1:
+        df['cluster'] = 0
+        return df
     
+    coords = df[['latitude', 'longitude']].values
+    
+    # Ensure we don't have more clusters than points
+    num_clusters = min(num_clusters, len(df))
+    
+    try:
+        kmeans = KMeans(n_clusters=num_clusters, random_state=0).fit(coords)
+        df['cluster'] = kmeans.labels_
+    except Exception as e:
+        print(f"KMeans clustering failed: {e}")
+        # Fallback: assign all points to cluster 0
+        df['cluster'] = 0
+        return df
+
+    # Fix clusters exceeding capacity
+    final_clusters = []
+    for cluster_id in range(num_clusters):
+        cluster = df[df['cluster'] == cluster_id]
+        if len(cluster) == 0:
+            continue
+            
+        if cluster['no_of_students'].sum() > max_students:
+            # Split large clusters
+            n_splits = int(np.ceil(cluster['no_of_students'].sum() / max_students))
+            split = np.array_split(cluster, n_splits)
+            for i, s in enumerate(split):
+                if len(s) > 0:  # Only add non-empty splits
+                    s['cluster'] = f"{cluster_id}_{i}"
+                    final_clusters.append(s)
+        else:
+            final_clusters.append(cluster)
+    
+    if not final_clusters:
+        # If no clusters were created, return original data with single cluster
+        df['cluster'] = 0
+        return df
+    
+    result = pd.concat(final_clusters)
+    return result
+
+def get_distance_matrix(cluster_df, college_coord, api_key):
+    """Get OSRM Distance Matrix using OpenRouteService"""
+    try:
+        client = openrouteservice.Client(key=api_key)
+        locations = [(college_coord[1], college_coord[0])] + list(zip(cluster_df['longitude'], cluster_df['latitude']))
+        res = client.distance_matrix(locations=locations, profile='driving-car', metrics=['distance', 'duration'])
+        return res['distances'], res['durations']
+    except Exception as e:
+        print(f"Distance matrix calculation failed: {e}")
+        # Fallback to simple distance calculation
+        return fallback_distance_matrix(cluster_df, college_coord)
+
+def fallback_distance_matrix(cluster_df, college_coord):
+    """Fallback distance calculation when API fails"""
+    n = len(cluster_df) + 1  # +1 for college
+    distances = [[0] * n for _ in range(n)]
+    durations = [[0] * n for _ in range(n)]
+    
+    # Calculate distances using simple formula
+    for i in range(n):
+        for j in range(n):
+            if i != j:
+                if i == 0:  # College
+                    lat1, lon1 = college_coord[0], college_coord[1]
+                else:
+                    lat1, lon1 = cluster_df.iloc[i-1]['latitude'], cluster_df.iloc[i-1]['longitude']
+                
+                if j == 0:  # College
+                    lat2, lon2 = college_coord[0], college_coord[1]
+                else:
+                    lat2, lon2 = cluster_df.iloc[j-1]['latitude'], cluster_df.iloc[j-1]['longitude']
+                
+                # Simple distance calculation
+                dx = (lon2 - lon1) * 111 * math.cos(math.radians((lat1 + lat2) / 2))
+                dy = (lat2 - lat1) * 111
+                distance = math.sqrt(dx * dx + dy * dy)
+                
+                distances[i][j] = int(distance * 1000)  # Convert to meters
+                durations[i][j] = int(distance * 2 * 60)  # 2 min per km
+    
+    return distances, durations
+
+def solve_tsp(distance_matrix):
+    """Solve TSP with OR-Tools"""
+    tsp_size = len(distance_matrix)
+    routing = pywrapcp.RoutingModel(tsp_size, 1, 0)
+    search_parameters = pywrapcp.RoutingModel.DefaultSearchParameters()
+    search_parameters.time_limit.seconds = 10  # 10 second limit
+
+    def distance_callback(from_node, to_node):
+        return int(distance_matrix[from_node][to_node])
+
+    routing.SetArcCostEvaluatorOfAllVehicles(distance_callback)
+    assignment = routing.SolveWithParameters(search_parameters)
+
+    route = []
+    if assignment:
+        index = routing.Start(0)
+        while not routing.IsEnd(index):
+            route.append(routing.IndexToNode(index))
+            index = assignment.Value(routing.NextVar(index))
+        route.append(routing.IndexToNode(index))
     return route
 
-def optimize_clusters(df, n_clusters):
-    """Optimize clustering with better initialization"""
-    coords = df[['Latitude', 'Longitude']].to_numpy()
-    
-    # Use k-means++ initialization for better clustering
-    kmeans = KMeans(
-        n_clusters=n_clusters, 
-        n_init=5,  # Reduced from 10 for speed
-        random_state=42,
-        init='k-means++',
-        max_iter=100  # Reduced for speed
-    )
-    
-    labels = kmeans.fit_predict(coords)
-    return labels
+def build_polyline(route_coords, api_key):
+    """Build polyline for frontend map display"""
+    try:
+        client = openrouteservice.Client(key=api_key)
+        geometry = client.directions(route_coords, profile='driving-car')['routes'][0]['geometry']
+        return polyline.decode(geometry)
+    except Exception as e:
+        print(f"Polyline generation failed: {e}")
+        # Return simple straight line
+        return route_coords
 
 def run_optimized_algorithm(df):
-    """Run the optimized clustering-based algorithm"""
+    """Run the optimized routing algorithm"""
     try:
         print("Starting optimized algorithm...")
         start_time = time.time()
         
         # Prepare data
-        df = df[['bus_stop_lat', 'bus_stop_lon', 'student_count']].copy()
-        df.columns = ['Latitude', 'Longitude', 'StudentCount']
-        
-        # Skip accessibility check for speed (assume all points are accessible)
+        df = load_boarding_points(df)
         print(f"Processing {len(df)} boarding points")
         
-        coords = df[['Latitude', 'Longitude']].to_numpy()
-        student_counts = df['StudentCount'].tolist()
-        total_students = int(sum(student_counts))  # Convert to native Python int
-        buses_needed = calculate_optimal_buses(total_students)
+        # Validate data
+        if len(df) == 0:
+            return {"error": "No data points found in the uploaded file"}
         
-        print(f"Total students: {total_students}, Using {buses_needed} buses")
-
-        # Optimized clustering
-        print("Optimizing clusters...")
-        labels = optimize_clusters(df, buses_needed)
-        df['Cluster'] = labels
-
-        # Solve TSP for each cluster with optimized approach
-        print("Solving optimized TSP for each cluster...")
+        # Check accessibility
+        df = check_accessibility(df)
+        print(f"After accessibility check: {len(df)} points")
+        
+        # Check if we still have data after accessibility filtering
+        if len(df) == 0:
+            return {"error": "No accessible boarding points found. Please check your coordinates."}
+        
+        # Cluster points
+        college_coord = (COLLEGE_LAT, COLLEGE_LON)
+        df = cluster_points(df, college_coord, MAX_BUS_CAPACITY)
+        print(f"Clustered into {df['cluster'].nunique()} clusters")
+        
+        # Check if clustering was successful
+        if len(df) == 0:
+            return {"error": "Clustering failed. Please check your data."}
+        
+        # Process each cluster
         all_routes = []
-        total_distance = 0.0  # Use float for distance
-        total_time = 0.0  # Use float for time
+        total_distance = 0.0
+        total_time = 0.0
         
-        for i in range(buses_needed):
-            cluster_points = df[df['Cluster'] == i]
-            if len(cluster_points) <= 1:
+        for cluster_id in df['cluster'].unique():
+            cluster_df = df[df['cluster'] == cluster_id]
+            print(f"Processing cluster {cluster_id} with {len(cluster_df)} points")
+            
+            # Get distance matrix
+            distance_matrix, duration_matrix = get_distance_matrix(cluster_df, college_coord, ORS_API_KEY)
+            
+            # Solve TSP
+            route_indices = solve_tsp(distance_matrix)
+            
+            if not route_indices:
+                print(f"No solution found for cluster {cluster_id}")
                 continue
-                
-            cluster_coords = cluster_points[['Latitude', 'Longitude']].to_numpy()
             
-            # Use fast distance calculation for small clusters
-            if len(cluster_coords) <= 10:
-                matrix = [[haversine_distance(cluster_coords[i][0], cluster_coords[i][1], 
-                                            cluster_coords[j][0], cluster_coords[j][1]) 
-                          for j in range(len(cluster_coords))] 
-                         for i in range(len(cluster_coords))]
-            else:
-                matrix = batch_distance_matrix(cluster_coords)
+            # Build route coordinates
+            ordered_coords = [(college_coord[1], college_coord[0])] + list(zip(cluster_df['longitude'], cluster_df['latitude']))
+            route_coords = [ordered_coords[i] for i in route_indices]
             
-            # Use fast TSP solver
-            route = fast_tsp_solve(cluster_coords, matrix)
+            # Calculate metrics
+            total_duration = sum(duration_matrix[route_indices[i]][route_indices[i+1]] for i in range(len(route_indices)-1)) / 60
+            total_distance_km = sum(distance_matrix[route_indices[i]][route_indices[i+1]] for i in range(len(route_indices)-1)) / 1000
             
-            if route:
-                ordered_points = cluster_coords[route]
+            # Check constraints
+            if total_duration <= MAX_DURATION_MIN and total_distance_km <= MAX_DISTANCE_KM:
+                # Build route stops
                 route_stops = []
                 
                 # Add college as starting point
                 route_stops.append({
                     'name': 'College',
-                    'lat': float(COLLEGE_LAT),  # Convert to native Python float
-                    'lon': float(COLLEGE_LON),  # Convert to native Python float
+                    'lat': float(COLLEGE_LAT),
+                    'lon': float(COLLEGE_LON),
                     'students': 0,
                     'type': 'college'
                 })
                 
                 # Add boarding points
                 cluster_students = 0
-                for j, point in enumerate(ordered_points):
-                    original_idx = cluster_points.index[route[j]]
-                    student_count = int(cluster_points.loc[original_idx, 'StudentCount'])  # Convert to native Python int
+                for i, coord in enumerate(route_coords[1:], 1):  # Skip college
+                    student_count = int(cluster_df.iloc[route_indices[i]-1]['no_of_students'])
                     cluster_students += student_count
                     
                     route_stops.append({
-                        'name': f"Route {i+1}",
-                        'lat': float(point[0]),  # Convert to native Python float
-                        'lon': float(point[1]),  # Convert to native Python float
+                        'name': f"Route {cluster_id}",
+                        'lat': float(coord[1]),
+                        'lon': float(coord[0]),
                         'students': student_count,
                         'type': 'boarding_point'
                     })
                 
-                # Calculate route metrics
-                route_distance = float(sum(matrix[route[j]][route[j+1]] for j in range(len(route)-1)))  # Convert to native Python float
-                route_time = float(route_distance * 2)  # Convert to native Python float
-                
                 all_routes.append({
-                    'bus_id': int(i + 1),  # Convert to native Python int
+                    'bus_id': int(len(all_routes) + 1),
                     'stops': route_stops,
-                    'total_students': int(cluster_students),  # Convert to native Python int
-                    'total_distance_km': route_distance,
-                    'total_time_min': route_time
+                    'total_students': int(cluster_students),
+                    'total_distance_km': float(total_distance_km),
+                    'total_time_min': float(total_duration)
                 })
                 
-                total_distance += route_distance
-                total_time += route_time
-
+                total_distance += total_distance_km
+                total_time += total_duration
+                
+                print(f"Route {cluster_id}: {len(route_stops)} stops, {total_distance_km:.1f} km, {total_duration:.0f} min")
+            else:
+                print(f"Route {cluster_id} exceeds time/distance limits")
+        
         elapsed_time = time.time() - start_time
         print(f"Generated {len(all_routes)} routes in {elapsed_time:.2f} seconds")
         
@@ -253,24 +341,22 @@ def run_optimized_algorithm(df):
             "success": True,
             "routes": all_routes,
             "summary": {
-                "total_routes": int(len(all_routes)),  # Convert to native Python int
-                "total_students": total_students,
-                "total_distance_km": float(total_distance),  # Convert to native Python float
-                "total_time_min": float(total_time),  # Convert to native Python float
-                "processing_time_seconds": float(elapsed_time)  # Convert to native Python float
+                "total_routes": int(len(all_routes)),
+                "total_students": int(sum(route['total_students'] for route in all_routes)),
+                "total_distance_km": float(total_distance),
+                "total_time_min": float(total_time),
+                "processing_time_seconds": float(elapsed_time)
             }
         }
-
+        
     except Exception as e:
-        print(f"Optimized algorithm error: {str(e)}")
+        print(f"Algorithm error: {str(e)}")
         return {"error": f"Algorithm error: {str(e)}"}
-
-
 
 def run_routing_algorithm(csv_data):
     """Run the routing algorithm on the provided CSV data"""
     try:
-        # === Step 1: Load Data ===
+        # Load data
         df = pd.read_csv(csv_data)
         
         # Validate required columns
@@ -281,11 +367,8 @@ def run_routing_algorithm(csv_data):
 
         print(f"Loaded {len(df)} boarding points")
         
-        # Use the new clustering-based algorithm
+        # Run the optimized algorithm
         return run_optimized_algorithm(df)
-
-    except Exception as e:
-        return {"error": f"Algorithm error: {str(e)}"}
 
     except Exception as e:
         return {"error": f"Algorithm error: {str(e)}"}
