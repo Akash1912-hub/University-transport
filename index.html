@@ -1490,12 +1490,12 @@
                 
                 let polylinePath = routePath;
                 
-                // If we have a Google Directions polyline, decode and use it for road-following route
+                // If we have a polyline, decode and use it for road-following route
                 if (route.polyline && route.polyline.trim() !== '') {
                     const decodedPath = decodePolyline(route.polyline);
                     if (decodedPath && decodedPath.length > 0) {
                         polylinePath = decodedPath;
-                        console.log(`Using Google Directions polyline with ${decodedPath.length} points for route ${route.bus_id}`);
+                        console.log(`Using road-following polyline with ${decodedPath.length} points for route ${route.bus_id}`);
                     } else {
                         console.warn(`Failed to decode polyline for route ${route.bus_id}, using direct path`);
                     }
@@ -1507,7 +1507,14 @@
                     strokeColor: routeColor,
                     strokeOpacity: 0.8,
                     strokeWeight: 4,
-                    map: window.optimizeMap // Use optimizeMap
+                    map: window.optimizeMap, // Use optimizeMap
+                    icons: [{
+                        icon: {
+                            path: google.maps.SymbolPath.FORWARD_CLOSED_ARROW
+                        },
+                        offset: '50%',
+                        repeat: '100px'
+                    }]
                 });
 
                 window.routePolylines.push(polyline);
