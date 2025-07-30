@@ -1485,11 +1485,25 @@
                     bounds.extend(position);
                 });
 
-                // Create route polyline
+                // Create route polyline - use OSRM polyline if available, otherwise use route path
                 console.log(`Creating polyline for route ${route.bus_id} with ${routePath.length} points`);
+                
+                let polylinePath = routePath;
+                
+                // If we have a Google Directions polyline, decode and use it for road-following route
+                if (route.polyline && route.polyline.trim() !== '') {
+                    const decodedPath = decodePolyline(route.polyline);
+                    if (decodedPath && decodedPath.length > 0) {
+                        polylinePath = decodedPath;
+                        console.log(`Using Google Directions polyline with ${decodedPath.length} points for route ${route.bus_id}`);
+                    } else {
+                        console.warn(`Failed to decode polyline for route ${route.bus_id}, using direct path`);
+                    }
+                }
+                
                 const polyline = new google.maps.Polyline({
-                    path: routePath,
-                    geodesic: true,
+                    path: polylinePath,
+                    geodesic: false, // Set to false for road-following routes
                     strokeColor: routeColor,
                     strokeOpacity: 0.8,
                     strokeWeight: 4,
@@ -1552,6 +1566,50 @@
                 '#3730a3', '#be123c', '#166534', '#a16207', '#92400e'
             ];
             return colors[index % colors.length];
+        }
+
+        // Fallback polyline decoder function
+        function decodePolyline(encoded) {
+            if (!encoded) return null;
+            
+            try {
+                // Use Google Maps geometry library if available
+                if (google && google.maps && google.maps.geometry) {
+                    return google.maps.geometry.encoding.decodePath(encoded);
+                }
+                
+                // Fallback: simple polyline decoder
+                const poly = [];
+                let index = 0, len = encoded.length;
+                let lat = 0, lng = 0;
+
+                while (index < len) {
+                    let b, shift = 0, result = 0;
+                    do {
+                        b = encoded.charCodeAt(index++) - 63;
+                        result |= (b & 0x1f) << shift;
+                        shift += 5;
+                    } while (b >= 0x20);
+                    let dlat = ((result & 1) ? ~(result >> 1) : (result >> 1));
+                    lat += dlat;
+
+                    shift = 0;
+                    result = 0;
+                    do {
+                        b = encoded.charCodeAt(index++) - 63;
+                        result |= (b & 0x1f) << shift;
+                        shift += 5;
+                    } while (b >= 0x20);
+                    let dlng = ((result & 1) ? ~(result >> 1) : (result >> 1));
+                    lng += dlng;
+
+                    poly.push({ lat: lat / 1E5, lng: lng / 1E5 });
+                }
+                return poly;
+            } catch (e) {
+                console.warn('Failed to decode polyline:', e);
+                return null;
+            }
         }
 
         // Update statistics
@@ -1672,7 +1730,7 @@
     </script>
     
     <script async defer
-        src="https://maps.googleapis.com/maps/api/js?key=AIzaSyBlfqs5K9HEe9c1Eu5bjPXXjr8Hz2mbTZE&callback=initMap">
+        src="https://maps.googleapis.com/maps/api/js?key=AIzaSyBlfqs5K9HEe9c1Eu5bjPXXjr8Hz2mbTZE&libraries=geometry&callback=initMap">
     </script>
 </body>
 </html> 
