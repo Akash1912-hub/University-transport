@@ -1238,7 +1238,7 @@
 
             const startTime = Date.now();
 
-            fetch('http://localhost:5000/api/route', {
+            fetch('http://localhost:5000/api/optimize', {
                 method: 'POST',
                 body: formData
             })
@@ -1247,33 +1247,58 @@
                 const endTime = Date.now();
                 const clientTime = (endTime - startTime) / 1000;
                 
+                console.log('API Response:', data); // Debug log
+                console.log('API Response structure:', {
+                    success: data.success,
+                    hasData: !!data.data,
+                    dataKeys: data.data ? Object.keys(data.data) : 'no data',
+                    hasRoutes: data.data && data.data.routes,
+                    routesLength: data.data && data.data.routes ? data.data.routes.length : 'no routes',
+                    hasSummary: data.data && data.data.summary,
+                    summaryKeys: data.data && data.data.summary ? Object.keys(data.data.summary) : 'no summary'
+                });
+                
+                // Additional debugging for routes structure
+                if (data.data && data.data.routes) {
+                    console.log('First route sample:', data.data.routes[0]);
+                    console.log('Routes structure check:', {
+                        hasStops: data.data.routes[0] && data.data.routes[0].stops,
+                        stopsLength: data.data.routes[0] && data.data.routes[0].stops ? data.data.routes[0].stops.length : 'no stops',
+                        firstStop: data.data.routes[0] && data.data.routes[0].stops ? data.data.routes[0].stops[0] : 'no first stop'
+                    });
+                }
+                
                 if (data.success) {
-                    optimizedRoutes = data.routes;
+                    optimizedRoutes = data.data.routes;
+                    console.log('Optimized Routes:', optimizedRoutes); // Debug log
                     
                     // Initialize optimize map if not already done
                     if (!window.optimizeMap) {
                         console.log('Initializing optimize map from route optimization...');
                         initOptimizeMap();
+                    } else {
+                        console.log('Optimize map already exists');
                     }
                     
                     // Add a delay to ensure map is ready
                     setTimeout(() => {
                         displayOptimizedRoutes();
-                        updateRouteSummary(data.summary);
+                        updateRouteSummary(data.data.summary);
                         updateDashboard();
                         updateOptimizedLegend(); // Update legend for optimized routes
                         
-                        const serverTime = data.summary.processing_time_seconds || 0;
+                        const serverTime = data.data.processing_time_seconds || 0;
                         message.innerHTML = `
                             <div class="success">
                                 <i class="fas fa-check-circle"></i> 
-                                Route optimization completed! Generated ${data.summary.total_routes} routes.
+                                Route optimization completed! Generated ${data.data.summary.total_buses_needed} routes.
                                 <br><small>Server processing time: ${serverTime.toFixed(2)}s | Total time: ${clientTime.toFixed(2)}s</small>
                             </div>
                         `;
                         routeInfo.style.display = 'block';
                         
                         // Switch to optimize section to show the routes
+                        console.log('Switching to optimize section...');
                         showSection('optimize');
                     }, 1000);
                 } else {
@@ -1352,11 +1377,21 @@
 
         // Check if optimize map is ready
         function isOptimizeMapReady() {
-            return window.optimizeMap && typeof window.optimizeMap !== 'undefined';
+            const isReady = window.optimizeMap && typeof window.optimizeMap !== 'undefined';
+            console.log('isOptimizeMapReady check:', {
+                hasOptimizeMap: !!window.optimizeMap,
+                optimizeMapType: typeof window.optimizeMap,
+                isReady: isReady
+            });
+            return isReady;
         }
 
         // Display optimized routes
         function displayOptimizedRoutes() {
+            console.log('displayOptimizedRoutes called');
+            console.log('optimizedRoutes length:', optimizedRoutes.length);
+            console.log('optimizedRoutes:', optimizedRoutes);
+            
             // Check if map is ready
             if (!isOptimizeMapReady()) {
                 console.log('Optimize map not ready, retrying in 500ms...');
@@ -1382,18 +1417,21 @@
             const routeColors = {};
 
             optimizedRoutes.forEach((route, routeIndex) => {
+                console.log(`Processing route ${routeIndex}:`, route);
                 const routeColor = getClusterColor(routeIndex);
                 routeColors[route.bus_id] = routeColor;
 
                 // Create route path
                 const routePath = [];
                 
+                console.log(`Route ${routeIndex} has ${route.stops ? route.stops.length : 'no'} stops`);
                 route.stops.forEach((stop, stopIndex) => {
-                    const position = { lat: stop.lat, lng: stop.lon };
+                    console.log(`Stop ${stopIndex}:`, stop);
+                    const position = { lat: stop.latitude, lng: stop.longitude };
                     routePath.push(position);
                     
                     let icon;
-                    if (stop.type === 'college') {
+                    if (stop.type === 'college_start' || stop.type === 'college_end') {
                         icon = {
                             url: createCollegeIcon(),
                             scaledSize: new google.maps.Size(50, 50),
@@ -1415,7 +1453,7 @@
                         title: `Bus ${route.bus_id}: ${stop.name}`,
                         icon: icon,
                         label: {
-                            text: stop.type === 'college' ? 'C' : stop.students.toString(),
+                            text: (stop.type === 'college_start' || stop.type === 'college_end') ? 'C' : stop.students.toString(),
                             color: 'white',
                             fontSize: '12px',
                             fontWeight: 'bold'
@@ -1432,8 +1470,8 @@
                                     <p style="margin: 8px 0; color: #495057;"><strong>Stop:</strong> ${stop.name}</p>
                                     <p style="margin: 8px 0; color: #495057;"><strong>Students:</strong> ${stop.students}</p>
                                     <p style="margin: 8px 0; color: #495057;"><strong>Type:</strong> ${stop.type}</p>
-                                    <p style="margin: 8px 0; color: #495057;"><strong>Route Distance:</strong> ${route.total_distance_km.toFixed(2)} km</p>
-                                    <p style="margin: 8px 0; color: #495057;"><strong>Route Time:</strong> ${route.total_time_min.toFixed(0)} min</p>
+                                    <p style="margin: 8px 0; color: #495057;"><strong>Route Distance:</strong> ${(route.total_distance_km || route.distance_km || 0).toFixed(2)} km</p>
+                                    <p style="margin: 8px 0; color: #495057;"><strong>Route Time:</strong> ${((route.total_duration_hours || route.duration_hours || 0) * 60).toFixed(0)} min</p>
                                 </div>
                             </div>
                         `
@@ -1448,6 +1486,7 @@
                 });
 
                 // Create route polyline
+                console.log(`Creating polyline for route ${route.bus_id} with ${routePath.length} points`);
                 const polyline = new google.maps.Polyline({
                     path: routePath,
                     geodesic: true,
@@ -1461,10 +1500,13 @@
             });
 
             // Fit map to show all routes
+            console.log('Bounds empty:', bounds.isEmpty());
             if (bounds.isEmpty()) {
+                console.log('Setting default center and zoom');
                 window.optimizeMap.setCenter({ lat: 13.0827, lng: 80.2707 }); // Use optimizeMap
                 window.optimizeMap.setZoom(10); // Use optimizeMap
             } else {
+                console.log('Fitting bounds to show all routes');
                 window.optimizeMap.fitBounds(bounds); // Use optimizeMap
                 // Add some padding to the bounds
                 const listener = google.maps.event.addListenerOnce(window.optimizeMap, 'bounds_changed', function() {
@@ -1550,7 +1592,7 @@
                 item.className = 'legend-item';
                 item.innerHTML = `
                     <div class="legend-color" style="background-color: ${routeColor}"></div>
-                    <span><i class="fas fa-bus"></i> Bus ${route.bus_id} (${route.total_students} students)</span>
+                    <span><i class="fas fa-bus"></i> Bus ${route.bus_id} (${route.total_students || route.students || 0} students)</span>
                 `;
                 legendItems.appendChild(item);
             });
@@ -1561,36 +1603,57 @@
 
         // Update dashboard
         function updateDashboard() {
+            console.log('updateDashboard called');
+            console.log('optimizedRoutes length:', optimizedRoutes.length);
+            console.log('optimizedRoutes sample:', optimizedRoutes.slice(0, 2));
+            
             const totalPoints = boardingPoints.length;
             const totalStudents = boardingPoints.reduce((sum, point) => sum + point.student_count, 0);
             const totalClusters = new Set(boardingPoints.map(point => point.cluster)).size;
-            const totalDistance = optimizedRoutes.reduce((sum, route) => sum + route.total_distance_km, 0);
+            const totalDistance = optimizedRoutes.reduce((sum, route) => sum + (route.total_distance_km || route.distance_km || 0), 0);
+
+            console.log('Dashboard values:', {
+                totalPoints,
+                totalStudents,
+                totalClusters,
+                optimizedRoutesLength: optimizedRoutes.length,
+                totalDistance
+            });
 
             document.getElementById('dashboardPoints').textContent = totalPoints;
             document.getElementById('dashboardStudents').textContent = totalStudents;
-            document.getElementById('dashboardRoutes').textContent = totalClusters;
+            document.getElementById('dashboardRoutes').textContent = optimizedRoutes.length || totalClusters;
             document.getElementById('dashboardDistance').textContent = totalDistance.toFixed(1);
         }
 
         // Update route summary
         function updateRouteSummary(summary) {
+            console.log('updateRouteSummary called with:', summary);
+            console.log('Summary keys:', Object.keys(summary || {}));
+            console.log('Summary values:', {
+                total_buses_needed: summary?.total_buses_needed,
+                total_students_covered: summary?.total_students_covered,
+                total_fleet_distance_km: summary?.total_fleet_distance_km,
+                total_fleet_duration_hours: summary?.total_fleet_duration_hours
+            });
+            
             const routeSummary = document.getElementById('routeSummary');
             routeSummary.innerHTML = `
                 <div class="route-stat">
-                    <div class="route-stat-number">${summary.total_routes}</div>
+                    <div class="route-stat-number">${summary?.total_buses_needed || summary?.total_buses || 0}</div>
                     <div class="route-stat-label">Total Routes</div>
                 </div>
                 <div class="route-stat">
-                    <div class="route-stat-number">${summary.total_students}</div>
+                    <div class="route-stat-number">${summary?.total_students_covered || summary?.total_students || 0}</div>
                     <div class="route-stat-label">Total Students</div>
                 </div>
                 <div class="route-stat">
-                    <div class="route-stat-number">${summary.total_distance_km.toFixed(1)}</div>
+                    <div class="route-stat-number">${(summary?.total_fleet_distance_km || summary?.total_distance_km || 0).toFixed(1)}</div>
                     <div class="route-stat-label">Total Distance (km)</div>
                 </div>
                 <div class="route-stat">
-                    <div class="route-stat-number">${summary.total_time_min.toFixed(0)}</div>
-                    <div class="route-stat-label">Total Time (min)</div>
+                    <div class="route-stat-number">${((summary?.total_fleet_duration_hours || summary?.average_duration_hours || 0) * 60).toFixed(0)}</div>
+                    <div class="route-stat-label">Avg Time (min)</div>
                 </div>
             `;
         }
