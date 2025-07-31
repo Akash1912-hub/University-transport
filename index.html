@@ -827,10 +827,12 @@
                             <div class="section-title">Optimization Results</div>
                         </div>
                         <div class="route-summary" id="routeSummary"></div>
+                        <div class="stats-grid" id="optimizeStatsGrid" style="margin-top:24px;"></div>
                     </div>
                     
                     <!-- Cluster Filter UI -->
                     <div class="cluster-filter" id="clusterFilter" style="display: none;">
+                        <div class="stats-grid" id="optimizeStatsGrid" style="margin-bottom:18px;"></div>
                         <div class="filter-header">
                             <i class="fas fa-filter"></i>
                             <span>Filter Clusters</span>
@@ -854,13 +856,13 @@
                 </div>
 
                 <!-- Statistics Section -->
-                <div id="statistics-section" class="section" style="display: none;">
+                <div id="statistics-section" class="section" style="display: block;">
                     <div class="section-header">
                         <i class="fas fa-chart-bar section-icon"></i>
                         <div class="section-title">Transport Statistics</div>
                     </div>
                     
-                    <div class="stats-grid" id="stats" style="display: none;">
+                    <div class="stats-grid" id="stats">
                         <div class="stat-card">
                             <div class="stat-number" id="totalPoints">0</div>
                             <div class="stat-label">Boarding Points</div>
@@ -1421,6 +1423,24 @@
             })
             .then(response => response.json())
             .then(data => {
+                // --- DEBUG: Show API response in statistics section for troubleshooting ---
+                const statsSection = document.getElementById('statistics-section');
+                if (statsSection) {
+                    let debugDiv = document.getElementById('api-debug-log');
+                    if (!debugDiv) {
+                        debugDiv = document.createElement('div');
+                        debugDiv.id = 'api-debug-log';
+                        debugDiv.style = 'background:#222;color:#fff;padding:10px;margin:10px 0 0 0;border-radius:8px;word-break:break-all;font-size:12px;max-height:200px;overflow:auto;';
+                        statsSection.appendChild(debugDiv);
+                    }
+                    debugDiv.innerHTML = '<b>API /api/optimize Response:</b><br><pre style="white-space:pre-wrap;">' + JSON.stringify(data, null, 2) + '</pre>';
+                }
+                // --- Always update statistics grid with summary if available ---
+                if (data && data.data && data.data.summary) {
+                    const statsGrid = document.getElementById('stats');
+                    if (statsGrid) statsGrid.style.display = 'grid';
+                    updateStats(data.data.summary);
+                }
                 const endTime = Date.now();
                 const clientTime = (endTime - startTime) / 1000;
                 
@@ -1450,10 +1470,9 @@
                     });
                 }
                 
-                if (data.success) {
+                if (data.success && data.data) {
                     optimizedRoutes = data.data.routes;
                     console.log('Optimized Routes:', optimizedRoutes); // Debug log
-                    
                     // Initialize optimize map if not already done
                     if (!window.optimizeMap) {
                         console.log('Initializing optimize map from route optimization...');
@@ -1461,14 +1480,47 @@
                     } else {
                         console.log('Optimize map already exists');
                     }
-                    
                     // Add a delay to ensure map is ready
                     setTimeout(() => {
                         displayOptimizedRoutes();
-                        updateRouteSummary(data.data.summary);
-                        updateDashboard();
+                        // Always pass both summary and routes to updateRouteSummary
+                        if (data.data && data.data.summary && data.data.routes) {
+                            updateRouteSummary({ ...data.data.summary, routes: data.data.routes });
+                        } else if (data.data && data.data.summary) {
+                            updateRouteSummary(data.data.summary);
+                        } else if (data.data) {
+                            updateRouteSummary(data.data);
+                        }
+                        // Update dashboard and statistics with optimized data from summary
+                        if (data.data.summary) {
+                            updateStats(data.data.summary);
+                            updateDashboard(data.data.summary);
+                            // Also show summary stats in optimize section
+                            const grid = document.getElementById('optimizeStatsGrid');
+                            if (grid) {
+                                grid.innerHTML = `
+                                    <div class="stat-card"><div class="stat-number">${data.data.summary.total_stops_all_buses || 0}</div><div class="stat-label">Boarding Points</div></div>
+                                    <div class="stat-card"><div class="stat-number">${data.data.summary.total_students_covered || 0}</div><div class="stat-label">Total Students</div></div>
+                                    <div class="stat-card"><div class="stat-number">${data.data.summary.total_buses_needed || 0}</div><div class="stat-label">Optimized Routes</div></div>
+                                    <div class="stat-card"><div class="stat-number">${(data.data.summary.total_fleet_distance_km || 0).toFixed(1)}</div><div class="stat-label">Total Distance (km)</div></div>
+                                `;
+                                grid.style.display = 'grid';
+                            }
+                            // --- Ensure statistics section is updated and visible ---
+                            const statsSection = document.getElementById('statistics-section');
+                            const statsGrid = document.getElementById('stats');
+                            if (statsSection) statsSection.style.display = 'block';
+                            if (statsGrid) statsGrid.style.display = 'grid';
+                            // Force update of stat numbers in case DOM was not refreshed
+                            if (document.getElementById('totalPoints')) document.getElementById('totalPoints').textContent = data.data.summary.total_stops_all_buses || 0;
+                            if (document.getElementById('totalStudents')) document.getElementById('totalStudents').textContent = data.data.summary.total_students_covered || 0;
+                            if (document.getElementById('totalClusters')) document.getElementById('totalClusters').textContent = data.data.summary.total_buses_needed || 0;
+                            if (document.getElementById('totalDistance')) document.getElementById('totalDistance').textContent = (data.data.summary.total_fleet_distance_km || 0).toFixed(1);
+                        }
+                        // Force dashboard to be visible
+                        const dashboardSection = document.getElementById('dashboard-section');
+                        if (dashboardSection) dashboardSection.style.display = 'block';
                         updateOptimizedLegend(); // Update legend for optimized routes
-                        
                         const serverTime = data.data.processing_time_seconds || 0;
                         message.innerHTML = `
                             <div class="success">
@@ -1478,7 +1530,6 @@
                             </div>
                         `;
                         routeInfo.style.display = 'block';
-                        
                         // Switch to optimize section to show the routes
                         console.log('Switching to optimize section...');
                         showSection('optimize');
@@ -1785,21 +1836,27 @@
         function createClusterFilter() {
             const clusterFilter = document.getElementById('clusterFilter');
             const clusterList = document.getElementById('clusterList');
-            
+            const grid = document.getElementById('optimizeStatsGrid');
             if (!clusterFilter || !clusterList) return;
-            
             // Show the filter
             clusterFilter.style.display = 'block';
-            
+            // Update stats grid if summary is available
+            if (window.optimizationSummary && grid) {
+                grid.innerHTML = `
+                    <div class="stat-card"><div class="stat-number">${window.optimizationSummary.total_stops_all_buses || 0}</div><div class="stat-label">Boarding Points</div></div>
+                    <div class="stat-card"><div class="stat-number">${window.optimizationSummary.total_students_covered || 0}</div><div class="stat-label">Total Students</div></div>
+                    <div class="stat-card"><div class="stat-number">${window.optimizationSummary.total_buses_needed || 0}</div><div class="stat-label">Optimized Routes</div></div>
+                    <div class="stat-card"><div class="stat-number">${(window.optimizationSummary.total_fleet_distance_km || 0).toFixed(1)}</div><div class="stat-label">Total Distance (km)</div></div>
+                `;
+                grid.style.display = 'grid';
+            }
             // Clear existing list
             clusterList.innerHTML = '';
-            
             // Create filter items for each cluster
             optimizedRoutes.forEach((route, index) => {
                 const routeColor = getClusterColor(index);
                 const totalStudents = route.total_students || route.students || 0;
                 const totalStops = route.stops ? route.stops.length - 2 : 0; // Exclude college start/end
-                
                 const clusterItem = document.createElement('div');
                 clusterItem.className = 'cluster-item visible';
                 clusterItem.innerHTML = `
@@ -1810,14 +1867,12 @@
                         <div class="cluster-stats">${totalStops} stops • ${totalStudents} students</div>
                     </div>
                 `;
-                
                 // Add event listener
                 const checkbox = clusterItem.querySelector('input[type="checkbox"]');
                 checkbox.addEventListener('change', (e) => {
                     toggleCluster(route.bus_id, e.target.checked);
                     updateClusterItemStyle(clusterItem, e.target.checked);
                 });
-                
                 clusterList.appendChild(clusterItem);
             });
             
@@ -1903,18 +1958,15 @@
         // Fallback polyline decoder function
         function decodePolyline(encoded) {
             if (!encoded) return null;
-            
             try {
                 // Use Google Maps geometry library if available
-                if (google && google.maps && google.maps.geometry) {
+                if (typeof google !== 'undefined' && google.maps && google.maps.geometry && google.maps.geometry.encoding) {
                     return google.maps.geometry.encoding.decodePath(encoded);
                 }
-                
                 // Fallback: simple polyline decoder
-                const poly = [];
+                let poly = [];
                 let index = 0, len = encoded.length;
                 let lat = 0, lng = 0;
-
                 while (index < len) {
                     let b, shift = 0, result = 0;
                     do {
@@ -1935,7 +1987,7 @@
                     let dlng = ((result & 1) ? ~(result >> 1) : (result >> 1));
                     lng += dlng;
 
-                    poly.push({ lat: lat / 1E5, lng: lng / 1E5 });
+                    poly.push({ lat: lat / 1e5, lng: lng / 1e5 });
                 }
                 return poly;
             } catch (e) {
@@ -1945,14 +1997,13 @@
         }
 
         // Update statistics
-        function updateStats() {
-            const totalPoints = boardingPoints.length;
-            const totalStudents = boardingPoints.reduce((sum, point) => sum + point.student_count, 0);
-            const totalClusters = new Set(boardingPoints.map(point => point.cluster)).size;
-
-            document.getElementById('totalPoints').textContent = totalPoints;
-            document.getElementById('totalStudents').textContent = totalStudents;
-            document.getElementById('totalClusters').textContent = totalClusters;
+        function updateStats(summary) {
+            // Update statistics section with summary data
+            if (!summary) return;
+            if (document.getElementById('totalPoints')) document.getElementById('totalPoints').textContent = summary.total_stops_all_buses || 0;
+            if (document.getElementById('totalStudents')) document.getElementById('totalStudents').textContent = summary.total_students_covered || 0;
+            if (document.getElementById('totalClusters')) document.getElementById('totalClusters').textContent = summary.total_buses_needed || 0;
+            if (document.getElementById('totalDistance')) document.getElementById('totalDistance').textContent = (summary.total_fleet_distance_km || 0).toFixed(1);
         }
 
         // Update legend
@@ -1992,28 +2043,13 @@
         }
 
         // Update dashboard
-        function updateDashboard() {
-            console.log('updateDashboard called');
-            console.log('optimizedRoutes length:', optimizedRoutes.length);
-            console.log('optimizedRoutes sample:', optimizedRoutes.slice(0, 2));
-            
-            const totalPoints = boardingPoints.length;
-            const totalStudents = boardingPoints.reduce((sum, point) => sum + point.student_count, 0);
-            const totalClusters = new Set(boardingPoints.map(point => point.cluster)).size;
-            const totalDistance = optimizedRoutes.reduce((sum, route) => sum + (route.total_distance_km || route.distance_km || 0), 0);
-
-            console.log('Dashboard values:', {
-                totalPoints,
-                totalStudents,
-                totalClusters,
-                optimizedRoutesLength: optimizedRoutes.length,
-                totalDistance
-            });
-
-            document.getElementById('dashboardPoints').textContent = totalPoints;
-            document.getElementById('dashboardStudents').textContent = totalStudents;
-            document.getElementById('dashboardRoutes').textContent = optimizedRoutes.length || totalClusters;
-            document.getElementById('dashboardDistance').textContent = totalDistance.toFixed(1);
+        function updateDashboard(summary) {
+            // Update dashboard section with summary data
+            if (!summary) return;
+            if (document.getElementById('dashboardPoints')) document.getElementById('dashboardPoints').textContent = summary.total_stops_all_buses || 0;
+            if (document.getElementById('dashboardStudents')) document.getElementById('dashboardStudents').textContent = summary.total_students_covered || 0;
+            if (document.getElementById('dashboardRoutes')) document.getElementById('dashboardRoutes').textContent = summary.total_buses_needed || 0;
+            if (document.getElementById('dashboardDistance')) document.getElementById('dashboardDistance').textContent = (summary.total_fleet_distance_km || 0).toFixed(1);
         }
 
         // Update route summary
@@ -2028,7 +2064,7 @@
             });
             
             const routeSummary = document.getElementById('routeSummary');
-            routeSummary.innerHTML = `
+            let html = `
                 <div class="route-stat">
                     <div class="route-stat-number">${summary?.total_buses_needed || summary?.total_buses || 0}</div>
                     <div class="route-stat-label">Total Routes</div>
@@ -2046,6 +2082,22 @@
                     <div class="route-stat-label">Avg Time (min)</div>
                 </div>
             `;
+            // Add per-bus details
+            if (summary?.routes && Array.isArray(summary.routes)) {
+                html += `<div style='margin-top:24px;'><h3 style='margin-bottom:10px;'>Bus-wise Details</h3>`;
+                summary.routes.forEach(route => {
+                    html += `
+                        <div style='border:1px solid #e5e7eb; border-radius:8px; margin-bottom:16px; padding:12px; background:#f9fafb;'>
+                            <b>Bus ${route.bus_id}</b> &nbsp;|&nbsp; <b>Students:</b> ${route.total_students} &nbsp;|&nbsp; <b>Distance:</b> ${route.bus_total_km.toFixed(2)} km &nbsp;|&nbsp; <b>Stops:</b> ${route.total_stops}
+                            <ul style='margin:8px 0 0 18px; padding:0;'>
+                                ${route.stops.filter(s => s.type === 'boarding_point').map(s => `<li><b>${s.name}</b> (Cluster: ${s.cluster_id}, Students: ${s.students})</li>`).join('')}
+                            </ul>
+                        </div>
+                    `;
+                });
+                html += `</div>`;
+            }
+            routeSummary.innerHTML = html;
         }
 
         // Initialize dashboard

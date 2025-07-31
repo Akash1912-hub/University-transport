@@ -73,51 +73,39 @@ class GoogleBasedRouteOptimizer:
             self.progress_callback(message, current, total)
 
     def get_cache_key(self, points: List[BoardingPoint], route_order: List[int]) -> str:
-        """Generate cache key for route"""
-        # Create a hash of the route coordinates
-        coords = [(self.college_lat, self.college_lon)]
-        for idx in route_order[1:-1]:
+        """Generate cache key for one-way route (stops to college)"""
+        # Only include stops (in order) and college as destination
+        coords = []
+        for idx in route_order[1:]:  # skip 0 (start at stop, not college)
             if idx > 0 and idx <= len(points):
                 point = points[idx-1]
                 coords.append((point.latitude, point.longitude))
         coords.append((self.college_lat, self.college_lon))
-        
-        # Create hash of coordinates
         coord_str = '|'.join([f"{lat:.6f},{lon:.6f}" for lat, lon in coords])
         return hashlib.md5(coord_str.encode()).hexdigest()
 
     def get_fast_route_estimate(self, points: List[BoardingPoint], route_order: List[int]) -> Dict:
-        """Get fast route estimate using direct distances (no API calls)"""
+        """Get fast route estimate for one-way (stops to college) using direct distances (no API calls)"""
         try:
-            # Build route coordinates
+            # Build route coordinates: stops in order, then college
             route_coords = []
-            route_coords.append((self.college_lat, self.college_lon))
-            
-            for idx in route_order[1:-1]:
+            for idx in route_order[1:]:  # skip 0 (start at stop, not college)
                 if idx > 0 and idx <= len(points):
                     point = points[idx-1]
                     route_coords.append((point.latitude, point.longitude))
-            
             route_coords.append((self.college_lat, self.college_lon))
-            
             # Calculate total distance using direct geodesic distances
             total_distance = 0
             for i in range(len(route_coords) - 1):
                 dist = geodesic(route_coords[i], route_coords[i + 1]).kilometers
                 total_distance += dist
-            
             # Estimate road distance (typically 1.3x direct distance)
             road_distance = total_distance * 1.3
             # Estimate duration (25 km/h average speed)
             duration_hours = road_distance / 25
-            
             # Create simple polyline for visualization
-            polyline_points = []
-            for lat, lon in route_coords:
-                polyline_points.append((lat, lon))
-            
+            polyline_points = route_coords
             encoded_polyline = polyline.encode(polyline_points)
-            
             return {
                 'distance_km': road_distance,
                 'duration_hours': duration_hours,
@@ -125,7 +113,6 @@ class GoogleBasedRouteOptimizer:
                 'success': True,
                 'route_quality': 'fast_estimate'
             }
-            
         except Exception as e:
             logger.warning(f"Error in fast route estimate: {e}")
             return None
@@ -182,39 +169,35 @@ class GoogleBasedRouteOptimizer:
             logger.error(f"❌ Error loading boarding points: {e}")
             raise
 
-    def cluster_by_capacity(self, points: List[BoardingPoint]) -> List[List[BoardingPoint]]:
-        """Step 1: Cluster boarding points by capacity constraint (55 students per bus)"""
-        logger.info(f"🎯 Clustering {len(points)} points with max capacity {MAX_BUS_CAPACITY}")
-        
-        # Sort points by distance from college (farthest first for better clustering)
+    def cluster_by_capacity_and_distance(self, points: List[BoardingPoint]) -> List[List[BoardingPoint]]:
+        """Cluster so each bus starts with the stop nearest to college, then fills with nearest unassigned stops, respecting only bus capacity (no route length constraint)."""
+        logger.info(f"🎯 Capacity-only clustering for {len(points)} points (max {MAX_BUS_CAPACITY} per bus, no route length constraint)")
         college_coord = (self.college_lat, self.college_lon)
-        points_with_distance = [(point, geodesic(college_coord, (point.latitude, point.longitude)).kilometers) 
-                               for point in points]
-        points_with_distance.sort(key=lambda x: x[1], reverse=True)
-        sorted_points = [point for point, _ in points_with_distance]
-        
+        unassigned = points[:]
         clusters = []
-        current_cluster = []
-        current_students = 0
-        
-        for point in sorted_points:
-            if current_students + point.student_count <= MAX_BUS_CAPACITY:
-                current_cluster.append(point)
-                current_students += point.student_count
-            else:
-                if current_cluster:
-                    clusters.append(current_cluster)
-                current_cluster = [point]
-                current_students = point.student_count
-        
-        if current_cluster:
-            clusters.append(current_cluster)
-        
-        logger.info(f"✅ Created {len(clusters)} clusters")
+        while unassigned:
+            # Start new cluster with stop nearest to college
+            nearest_idx = min(range(len(unassigned)), key=lambda i: geodesic(college_coord, (unassigned[i].latitude, unassigned[i].longitude)).kilometers)
+            start_point = unassigned.pop(nearest_idx)
+            cluster = [start_point]
+            total_students = start_point.student_count
+            while unassigned:
+                # Find stop nearest to last stop in cluster
+                last_stop = cluster[-1]
+                nearest_idx = min(range(len(unassigned)), key=lambda i: geodesic((last_stop.latitude, last_stop.longitude), (unassigned[i].latitude, unassigned[i].longitude)).kilometers)
+                candidate = unassigned[nearest_idx]
+                # Check if adding this stop exceeds capacity
+                if total_students + candidate.student_count > MAX_BUS_CAPACITY:
+                    break
+                # Add to cluster
+                cluster.append(candidate)
+                total_students += candidate.student_count
+                unassigned.pop(nearest_idx)
+            clusters.append(cluster)
+        logger.info(f"✅ Created {len(clusters)} clusters (capacity-only, no route length constraint)")
         for i, cluster in enumerate(clusters):
             total_students = sum(p.student_count for p in cluster)
             logger.info(f"  Cluster {i+1}: {len(cluster)} points, {total_students} students")
-        
         return clusters
 
     def check_google_directions_accessibility(self, points: List[BoardingPoint]) -> bool:
@@ -347,70 +330,57 @@ class GoogleBasedRouteOptimizer:
         return distance_matrix, duration_matrix
 
     def solve_tsp_with_ortools(self, points: List[BoardingPoint]) -> Tuple[List[int], float, float]:
-        """Step 3: Solve TSP using OR-Tools with Google Distance Matrix"""
+        """Solve one-way route: all stops to college (not round trip) using OR-Tools"""
         if not points:
             return [], 0, 0
-        
-        logger.info(f"🎯 Solving TSP for {len(points)} points using OR-Tools")
-        
+        logger.info(f"🎯 Solving one-way route for {len(points)} points using OR-Tools")
         # Get distance matrix from Google API
         distance_matrix, duration_matrix = self.get_google_distance_matrix(points)
-        
-        # Create routing model
         n_locations = len(points) + 1  # +1 for college
-        manager = pywrapcp.RoutingIndexManager(n_locations, 1, 0)  # Start from college (index 0)
+        # Start at the farthest stop from college, end at college
+        college_coord = (self.college_lat, self.college_lon)
+        farthest_idx = max(range(len(points)), key=lambda i: geodesic(college_coord, (points[i].latitude, points[i].longitude)).kilometers)
+        start_index = farthest_idx + 1  # +1 because 0 is college
+        end_index = 0  # college
+        manager = pywrapcp.RoutingIndexManager(n_locations, 1, [start_index], [end_index])
         routing = pywrapcp.RoutingModel(manager)
-        
         def distance_callback(from_index, to_index):
             from_node = manager.IndexToNode(from_index)
             to_node = manager.IndexToNode(to_index)
-            return int(distance_matrix[0][to_node] * 1000)  # Convert to meters
-        
+            return int(distance_matrix[0][to_node] * 1000)
         transit_callback_index = routing.RegisterTransitCallback(distance_callback)
         routing.SetArcCostEvaluatorOfAllVehicles(transit_callback_index)
-        
-        # Force the route to end at college
-        college_idx = n_locations - 1
-        routing.AddDisjunction([manager.NodeToIndex(college_idx)], 0)
-        
-        # Enhanced search parameters
         search_parameters = pywrapcp.DefaultRoutingSearchParameters()
         search_parameters.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
         search_parameters.local_search_metaheuristic = routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
         search_parameters.time_limit.seconds = 30
-        
         solution = routing.SolveWithParameters(search_parameters)
-        
         if solution:
-            # Extract route
             route_indices = []
             index = routing.Start(0)
-            
             while not routing.IsEnd(index):
                 route_indices.append(manager.IndexToNode(index))
                 index = solution.Value(routing.NextVar(index))
-            
             route_indices.append(manager.IndexToNode(index))
-            
-            # Calculate total distance and duration
             total_distance = 0
             total_duration = 0
-            
             for i in range(len(route_indices) - 1):
                 from_idx = route_indices[i]
                 to_idx = route_indices[i + 1]
                 total_distance += distance_matrix[0][to_idx]
                 total_duration += duration_matrix[0][to_idx]
-            
-            logger.info(f"✅ TSP solved: {total_distance:.1f}km, {total_duration:.1f}h")
+            logger.info(f"✅ One-way route solved: {total_distance:.1f}km, {total_duration:.1f}h")
             return route_indices, total_distance, total_duration
-        
         logger.warning("❌ TSP solver failed, using simple ordering")
-        # Fallback: simple college → points → college
-        fallback_route = [0] + list(range(1, n_locations)) + [0]
-        total_distance = sum(distance_matrix[0][i] for i in range(1, n_locations)) * 2
-        total_duration = sum(duration_matrix[0][i] for i in range(1, n_locations)) * 2
-        
+        # Fallback: stops in order, then college
+        fallback_route = [start_index] + [i+1 for i in range(len(points)) if (i+1)!=start_index] + [0]
+        total_distance = 0
+        total_duration = 0
+        for i in range(len(fallback_route) - 1):
+            from_idx = fallback_route[i]
+            to_idx = fallback_route[i + 1]
+            total_distance += distance_matrix[0][to_idx]
+            total_duration += duration_matrix[0][to_idx]
         return fallback_route, total_distance, total_duration
 
     def get_osrm_route(self, points: List[BoardingPoint], route_order: List[int]) -> Dict:
@@ -630,17 +600,13 @@ class GoogleBasedRouteOptimizer:
     def process_single_cluster(self, cluster_data: Tuple[int, List[BoardingPoint]]) -> OptimizedRoute:
         """Process a single cluster and return optimized route"""
         cluster_idx, cluster_points = cluster_data
-        
         try:
             logger.info(f"🎯 Processing Cluster {cluster_idx + 1} with {len(cluster_points)} points")
-            
             # Step 1: Solve TSP for optimal route
             route_order, distance, duration = self.solve_tsp_with_ortools(cluster_points)
-            
             if not route_order:
-                logger.error(f"❌ Failed to generate route for cluster {cluster_idx + 1}")
+                logger.error(f"❌ Failed to generate route for cluster {cluster_idx + 1} (no route_order). Points: {cluster_points}")
                 return None
-            
             # Step 2: Check cache first
             cache_key = self.get_cache_key(cluster_points, route_order)
             if cache_key in self.route_cache:
@@ -649,7 +615,6 @@ class GoogleBasedRouteOptimizer:
             else:
                 # Step 3: Try OSRM first (fastest)
                 route_details = self.get_osrm_route(cluster_points, route_order)
-                
                 # If OSRM fails, use fast estimate for small clusters
                 if not route_details or not route_details.get('success'):
                     if len(cluster_points) <= 5:  # Small clusters get fast estimate
@@ -658,15 +623,15 @@ class GoogleBasedRouteOptimizer:
                     else:
                         # Try Google Directions as fallback
                         route_details = self.get_google_directions_route(cluster_points, route_order)
-                
                 # Cache the result
                 if route_details and route_details.get('success'):
                     self.route_cache[cache_key] = route_details
-            
             if not route_details or not route_details.get('success'):
-                logger.error(f"❌ Failed to get route details for cluster {cluster_idx + 1}")
+                if len(cluster_points) == 1:
+                    logger.error(f"❌ Single-point cluster {cluster_idx + 1} for stop {cluster_points[0].cluster_id} could not generate a valid route. Details: {route_details}")
+                else:
+                    logger.error(f"❌ Failed to get route details for cluster {cluster_idx + 1}. route_details: {route_details}")
                 return None
-            
             # Create route stops
             stops = []
             stops.append({
@@ -677,10 +642,8 @@ class GoogleBasedRouteOptimizer:
                 'students': 0,
                 'stop_order': 0
             })
-            
             total_students = 0
             stop_order = 1
-            
             for idx in route_order[1:-1]:
                 if idx > 0 and idx <= len(cluster_points):
                     point = cluster_points[idx-1]
@@ -695,7 +658,6 @@ class GoogleBasedRouteOptimizer:
                     })
                     total_students += point.student_count
                     stop_order += 1
-            
             stops.append({
                 'type': 'college_end',
                 'name': 'College (End)',
@@ -704,7 +666,7 @@ class GoogleBasedRouteOptimizer:
                 'students': 0,
                 'stop_order': stop_order
             })
-            
+            # 40km max distance constraint removed: all clusters are accepted regardless of route length
             # Create optimized route
             optimized_route = OptimizedRoute(
                 bus_id=cluster_idx + 1,
@@ -716,14 +678,11 @@ class GoogleBasedRouteOptimizer:
                 polyline=route_details['polyline'],
                 accessible=route_details.get('route_quality') != 'fast_estimate'
             )
-            
             logger.info(f"✅ Bus {cluster_idx + 1}: {len(stops)-2} stops, {total_students} students, "
-                      f"{route_details['distance_km']:.1f}km, {route_details['duration_hours']:.1f}h")
-            
+                        f"{route_details['distance_km']:.1f}km, {route_details['duration_hours']:.1f}h")
             return optimized_route
-            
         except Exception as e:
-            logger.error(f"❌ Error processing cluster {cluster_idx + 1}: {e}")
+            logger.error(f"❌ Error processing cluster {cluster_idx + 1}: {e}. Points: {cluster_points}")
             return None
 
     def process_all_clusters(self, clusters: List[List[BoardingPoint]]) -> List[OptimizedRoute]:
@@ -774,15 +733,16 @@ class GoogleBasedRouteOptimizer:
         return all_routes
 
     def get_optimization_summary(self) -> Dict:
-        """Get comprehensive optimization summary"""
+        """Get comprehensive optimization summary with per-bus and total stop statistics"""
         if not self.optimized_routes:
             return {'error': 'No routes generated'}
-        
+
         total_students = sum(route.total_students for route in self.optimized_routes)
         total_distance = sum(route.total_distance_km for route in self.optimized_routes)
         total_duration = sum(route.total_duration_hours for route in self.optimized_routes)
         accessible_routes = sum(1 for route in self.optimized_routes if route.accessible)
-        
+        total_stops_all_buses = sum(len([stop for stop in route.stops if stop['type'] == 'boarding_point']) for route in self.optimized_routes)
+
         return {
             'success': True,
             'summary': {
@@ -794,7 +754,8 @@ class GoogleBasedRouteOptimizer:
                 'inaccessible_routes': len(self.optimized_routes) - accessible_routes,
                 'average_students_per_bus': round(total_students / len(self.optimized_routes), 1),
                 'average_distance_per_route': round(total_distance / len(self.optimized_routes), 1),
-                'capacity_utilization': round((total_students / (len(self.optimized_routes) * MAX_BUS_CAPACITY)) * 100, 1)
+                'capacity_utilization': round((total_students / (len(self.optimized_routes) * MAX_BUS_CAPACITY)) * 100, 1),
+                'total_stops_all_buses': total_stops_all_buses
             },
             'routes': [
                 {
@@ -807,7 +768,8 @@ class GoogleBasedRouteOptimizer:
                     'accessible': route.accessible,
                     'capacity_utilization': round((route.total_students / MAX_BUS_CAPACITY) * 100, 1),
                     'stops': route.stops,
-                    'polyline': route.polyline
+                    'polyline': route.polyline,
+                    'bus_total_km': route.total_distance_km  # Per-bus total km
                 }
                 for route in self.optimized_routes
             ]
@@ -853,7 +815,18 @@ def optimize_routes():
         except Exception as e:
             return jsonify({"error": f"Error reading CSV file: {str(e)}"}), 400
 
-        # Validate CSV structure
+            # Read CSV data
+            try:
+                csv_content = file.read().decode('utf-8')
+                df = pd.read_csv(StringIO(csv_content))
+                
+                if df.empty:
+                    return jsonify({"error": "CSV file is empty"}), 400
+                    
+            except UnicodeDecodeError:
+                return jsonify({"error": "Invalid file encoding. Please use UTF-8 encoded CSV"}), 400
+            except Exception as e:
+                return jsonify({"error": f"Error reading CSV file: {str(e)}"}), 400
         required_columns = ['cluster', 'student_count', 'bus_stop_lat', 'bus_stop_lon']
         missing_columns = [col for col in required_columns if col not in df.columns]
         
@@ -878,44 +851,53 @@ def optimize_routes():
         if not boarding_points:
             return jsonify({"error": "No valid boarding points found in the uploaded file"}), 400
         
-        # Step 2: Cluster by capacity
-        clusters = optimizer.cluster_by_capacity(boarding_points)
-        
+        # Step 2: Cluster by capacity and distance (clustering approach)
+        clusters = optimizer.cluster_by_capacity_and_distance(boarding_points)
         if not clusters:
             return jsonify({"error": "No valid clusters could be created"}), 400
-        
         logger.info(f"🚀 Starting optimization for {len(clusters)} clusters with parallel processing...")
-        
         # Step 3: Process all clusters in parallel
         optimized_routes = optimizer.process_all_clusters(clusters)
-        
-        if not optimized_routes:
+        # Filter out None or empty routes (no stops or students),
+        # but allow single-point routes even if over 40km as long as they have at least one student
+        valid_routes = []
+        for r in optimized_routes:
+            if not r:
+                continue
+            boarding_stops = [s for s in r.stops if s['type'] == 'boarding_point']
+            if r.total_students > 0 and len(boarding_stops) > 0:
+                valid_routes.append(r)
+        if not valid_routes:
             return jsonify({"error": "No valid routes could be generated"}), 400
-        
+        # Replace the optimizer's routes with only valid ones for summary
+        optimizer.optimized_routes = valid_routes
         # Get comprehensive summary
-        summary = optimizer.get_optimization_summary()
+        summary_obj = optimizer.get_optimization_summary()
         processing_time = time.time() - start_time
+        # Flatten summary for frontend compatibility
+        summary = summary_obj.get('summary', {})
+        routes = summary_obj.get('routes', [])
+        # Add extra info for debugging/performance
         summary['processing_time_seconds'] = round(processing_time, 2)
         summary['input_summary'] = {
             'total_boarding_points': len(boarding_points),
             'total_clusters': len(clusters),
-            'routes_generated': len(optimized_routes)
+            'routes_generated': len(valid_routes)
         }
-        
-        # Add performance metrics
         summary['performance'] = {
             'clusters_per_minute': round((len(clusters) / processing_time) * 60, 1),
             'processing_speed': 'parallel',
             'estimated_time_saved': '70-80% faster than sequential processing'
         }
-        
-        logger.info(f"🎉 Generated {len(optimized_routes)} routes in {processing_time:.2f} seconds")
+        logger.info(f"🎉 Generated {len(valid_routes)} routes in {processing_time:.2f} seconds")
         logger.info(f"⚡ Performance: {summary['performance']['clusters_per_minute']} clusters/minute")
-        
         return jsonify({
             "success": True,
-            "message": f"Successfully generated {len(optimized_routes)} optimized routes in {processing_time:.1f} seconds",
-            "data": summary
+            "message": f"Successfully generated {len(valid_routes)} optimized routes in {processing_time:.1f} seconds",
+            "data": {
+                "summary": summary,
+                "routes": routes
+            }
         })
         
     except Exception as e:
